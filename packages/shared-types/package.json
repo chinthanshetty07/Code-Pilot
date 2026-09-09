@@ -1,0 +1,11 @@
+{
+  "name": "@codepilot/shared-types",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Shared TypeScript types for CodePilot frontend/backend contracts",
+  "types": "src/index.ts",
+  "main": "src/index.ts",
+  "files": [
+    "src"
+  ]
+}
