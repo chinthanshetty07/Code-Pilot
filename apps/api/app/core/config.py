@@ -13,12 +13,15 @@ class Settings(BaseSettings):
     environment: str = "development"
     secret_key: str = "change-me-in-production"
 
-    database_url: str = "postgresql+psycopg://codepilot:codepilot@localhost:5432/codepilot"
+    database_url: str = "postgresql+psycopg://codepilot:codepilot@localhost:5433/codepilot"
     redis_url: str = "redis://localhost:6379/0"
 
     github_client_id: str = ""
     github_client_secret: str = ""
     github_webhook_secret: str = ""
+
+    api_base_url: str = "http://localhost:8010"
+    frontend_url: str = "http://localhost:3000"
 
     llm_provider: str = "anthropic"
     llm_api_key: str = ""

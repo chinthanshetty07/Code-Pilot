@@ -14,3 +14,31 @@ export interface ReadinessResponse {
     redis: ServiceStatus;
   };
 }
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  name: string | null;
+  avatar_url: string | null;
+}
+
+export interface GithubRepoSummary {
+  github_id: number;
+  full_name: string;
+  description: string | null;
+  language: string | null;
+  private: boolean;
+  default_branch: string;
+}
+
+export interface ConnectedRepository {
+  id: string;
+  github_id: number;
+  full_name: string;
+  description: string | null;
+  language: string | null;
+  default_branch: string;
+  private: boolean;
+  indexing_status: string;
+  connected_at: string;
+}

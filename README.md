@@ -39,6 +39,12 @@ pnpm install
 pnpm --filter web dev
 ```
 
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md) — system architecture and security model
+- [docs/workflow.md](docs/workflow.md) — the end-to-end issue-to-PR workflow, step by step
+- [docs/roadmap.md](docs/roadmap.md) — phase-by-phase build plan
+
 ## Project layout
 
 ```

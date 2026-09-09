@@ -28,6 +28,7 @@ export async function apiFetch<T>(
 
   const response = await fetch(url, {
     ...init,
+    credentials: "include",
     headers: {
       Accept: "application/json",
       ...init?.headers,
@@ -39,6 +40,10 @@ export async function apiFetch<T>(
       response.status,
       `Request to ${path} failed with status ${response.status}`,
     );
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return (await response.json()) as T;

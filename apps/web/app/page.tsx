@@ -1,4 +1,7 @@
+import { Suspense } from "react";
 import { HealthBadge } from "@/components/health-badge";
+import { AuthSection } from "@/components/auth-section";
+import { OAuthErrorBanner } from "@/components/oauth-error-banner";
 
 // Placeholder landing screen for Milestone 1 — proves the frontend can
 // build/deploy and reach the API. The real marketing landing page is a
@@ -14,6 +17,12 @@ export default function Home() {
           Your AI pair programmer for real-world repositories.
         </p>
       </div>
+      {/* useSearchParams() needs a Suspense boundary or the page can't be
+          statically rendered. */}
+      <Suspense fallback={null}>
+        <OAuthErrorBanner />
+      </Suspense>
+      <AuthSection />
       <HealthBadge />
     </div>
   );
