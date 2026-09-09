@@ -74,3 +74,9 @@ def test_github_repos_requires_authentication(client: TestClient) -> None:
     response = client.get("/api/github/repos")
 
     assert response.status_code == 401
+
+
+def test_index_repository_requires_authentication(client: TestClient) -> None:
+    response = client.post("/api/repositories/does-not-matter/index")
+
+    assert response.status_code == 401

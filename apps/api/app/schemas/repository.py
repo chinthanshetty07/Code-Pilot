@@ -24,6 +24,10 @@ class RepositoryOut(BaseModel):
     default_branch: str
     private: bool
     indexing_status: str
+    indexing_error: str | None
+    file_count: int
+    chunk_count: int
+    indexed_at: datetime | None
     connected_at: datetime
 
 

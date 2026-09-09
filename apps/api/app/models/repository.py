@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models import Base
 
 if TYPE_CHECKING:
+    from app.models.code_chunk import CodeChunk
     from app.models.user import User
 
 
@@ -26,8 +27,15 @@ class Repository(Base):
     default_branch: Mapped[str]
     private: Mapped[bool] = mapped_column(default=False)
     indexing_status: Mapped[str] = mapped_column(default="not_indexed")
+    indexing_error: Mapped[str | None]
+    file_count: Mapped[int] = mapped_column(default=0)
+    chunk_count: Mapped[int] = mapped_column(default=0)
+    indexed_at: Mapped[datetime | None]
     connected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     owner: Mapped["User"] = relationship(back_populates="repositories")
+    code_chunks: Mapped[list["CodeChunk"]] = relationship(
+        back_populates="repository", cascade="all, delete-orphan"
+    )

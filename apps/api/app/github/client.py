@@ -81,5 +81,16 @@ class GitHubClient:
         response.raise_for_status()
         return response.json()
 
+    async def download_tarball(self, full_name: str, ref: str = "HEAD") -> bytes:
+        """Download the whole repository as a gzipped tarball in one request
+        (cheaper than walking the tree + fetching each blob individually)."""
+        response = await self._client.get(
+            f"/repos/{full_name}/tarball/{ref}",
+            follow_redirects=True,
+            timeout=60.0,
+        )
+        response.raise_for_status()
+        return response.content
+
     async def aclose(self) -> None:
         await self._client.aclose()

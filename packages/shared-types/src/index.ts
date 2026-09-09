@@ -40,5 +40,9 @@ export interface ConnectedRepository {
   default_branch: string;
   private: boolean;
   indexing_status: string;
+  indexing_error: string | null;
+  file_count: number;
+  chunk_count: number;
+  indexed_at: string | null;
   connected_at: string;
 }
