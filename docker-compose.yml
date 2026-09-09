@@ -35,9 +35,10 @@ services:
       DATABASE_URL: postgresql+psycopg://codepilot:codepilot@postgres:5432/codepilot
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "8000:8000"
+      - "8010:8000"
     volumes:
       - ./apps/api:/app
+      - /app/.venv
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       postgres:
@@ -55,6 +56,7 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ./apps/api:/app
+      - /app/.venv
     command: arq app.workers.worker.WorkerSettings
     depends_on:
       postgres:
@@ -67,7 +69,7 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8010
     ports:
       - "3000:3000"
     volumes:

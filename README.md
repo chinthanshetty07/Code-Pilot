@@ -25,7 +25,7 @@ docker compose up
 ```
 
 - Frontend: http://localhost:3000
-- API: http://localhost:8000 — interactive docs at `/docs`, health at `/health` and `/health/ready`
+- API: http://localhost:8010 — interactive docs at `/docs`, health at `/health` and `/health/ready` (mapped off the default 8000 because another local project already uses that port on this machine; change it back in `docker-compose.yml` / `.env` if that's no longer true for you)
 
 ### Running the pieces individually (no Docker)
 
