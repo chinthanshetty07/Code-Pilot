@@ -3,7 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import type { CodeChange, Issue, Plan, Review, TestRun } from "@codepilot/shared-types";
+import type {
+  CodeChange,
+  Issue,
+  Plan,
+  PullRequest,
+  Review,
+  TestRun,
+} from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
@@ -143,6 +150,34 @@ const REVIEW_STATUS_LABEL: Record<string, string> = {
   reviewing: "Reviewing…",
   approved: "Approved",
   changes_requested: "Changes requested",
+  failed: "Failed",
+};
+
+// Statuses that mean "CodePilot is pushing/opening it" -- same idea as
+// `PENDING_REVIEW_STATUSES` above, scoped to `pull_request.status`.
+const PENDING_PR_STATUSES = new Set(["queued", "creating"]);
+
+function isPendingPRStatus(status: string): boolean {
+  return PENDING_PR_STATUSES.has(status);
+}
+
+// Dot color + label per `pull_request.status`. Same convention as
+// `REVIEW_STATUS_DOT_CLASS`/`REVIEW_STATUS_LABEL` above, but with only one
+// terminal failure state instead of a three-way split: unlike a test run
+// or a review, there's no equivalent of "ran, but the verdict was
+// negative" for opening a PR -- it either genuinely exists on GitHub now
+// ("created", emerald) or the attempt didn't produce one ("failed", red).
+const PR_STATUS_DOT_CLASS: Record<string, string> = {
+  queued: "bg-amber-400",
+  creating: "bg-amber-400 animate-pulse",
+  created: "bg-emerald-500",
+  failed: "bg-red-500",
+};
+
+const PR_STATUS_LABEL: Record<string, string> = {
+  queued: "Queued…",
+  creating: "Creating…",
+  created: "Created",
   failed: "Failed",
 };
 
@@ -353,6 +388,34 @@ function reviewButtonLabel(review: Review | null, isRequesting: boolean): string
       return "Request review again";
     default:
       return "Request review";
+  }
+}
+
+// Button label for the create-pull-request action. Unlike the other three
+// button-label functions above, this is never called for a "created"
+// pull_request -- the main component renders a "View pull request" link
+// in its place instead of a clickable button once a real PR exists (see
+// PullRequest's own status docstring for why that's a true terminal
+// state, not a replaceable one like the others).
+function pullRequestButtonLabel(
+  pullRequest: PullRequest | null,
+  isRequesting: boolean,
+): string {
+  if (isRequesting) {
+    return "Starting…";
+  }
+  if (!pullRequest) {
+    return "Create Pull Request";
+  }
+  switch (pullRequest.status) {
+    case "queued":
+      return "Queued…";
+    case "creating":
+      return "Creating…";
+    case "failed":
+      return "Try again";
+    default:
+      return "Create Pull Request";
   }
 }
 
@@ -695,6 +758,77 @@ function ReviewView({ review }: { review: Review }) {
   );
 }
 
+// Mirrors `ReviewView` above: status row first, then a status-dependent
+// content region -- but a single terminal failure state instead of a
+// three-way split (see `PR_STATUS_DOT_CLASS`'s comment for why). "created"
+// gets the most prominent treatment of any terminal state on this page: a
+// real, clickable link to the actual PR, since that link is the entire
+// point of this stage.
+function PullRequestView({ pullRequest }: { pullRequest: PullRequest }) {
+  const isPending = isPendingPRStatus(pullRequest.status);
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          aria-hidden
+          className={`h-2 w-2 shrink-0 rounded-full ${
+            PR_STATUS_DOT_CLASS[pullRequest.status] ?? ""
+          }`}
+        />
+        <span className="text-sm text-zinc-600 dark:text-zinc-400">
+          {PR_STATUS_LABEL[pullRequest.status] ?? pullRequest.status}
+          {" · "}
+          <span title={formatAbsoluteTime(pullRequest.created_at)} suppressHydrationWarning>
+            {formatRelativeTime(pullRequest.created_at)}
+          </span>
+        </span>
+      </div>
+
+      {pullRequest.status === "failed" ? (
+        <div className="flex flex-col gap-2">
+          <SectionHeading>Pull request creation failed</SectionHeading>
+          <p className="whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-400">
+            {pullRequest.error ?? "Something went wrong while creating the pull request."}
+          </p>
+        </div>
+      ) : isPending ? (
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400"
+        >
+          <span
+            aria-hidden
+            className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-400"
+          />
+          <span>
+            {pullRequest.status === "queued"
+              ? "Queued…"
+              : "Pushing your changes and opening a pull request…"}{" "}
+            This usually takes a few seconds.
+          </span>
+        </div>
+      ) : pullRequest.status === "created" && pullRequest.pr_url ? (
+        <a
+          href={pullRequest.pr_url}
+          target="_blank"
+          rel="noreferrer"
+          className="flex flex-col gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 transition-colors hover:bg-emerald-100 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-400 dark:hover:bg-emerald-950/50"
+        >
+          <span className="font-medium">
+            View pull request{pullRequest.pr_number ? ` #${pullRequest.pr_number}` : ""} on
+            GitHub ↗
+          </span>
+          {pullRequest.branch_name ? (
+            <span className="break-all font-mono text-xs opacity-80">
+              {pullRequest.branch_name}
+            </span>
+          ) : null}
+        </a>
+      ) : null}
+    </div>
+  );
+}
+
 export default function IssueDetailPage() {
   const { id: repositoryId, issueId } = useParams<{
     id: string;
@@ -876,6 +1010,54 @@ export default function IssueDetailPage() {
     }
   }, [repositoryId, issueId, loadIssue]);
 
+  // --- Pull request (human approval + GitHub PR creation) ---
+  const [pullRequestRequesting, setPullRequestRequesting] = useState(false);
+  const [pullRequestError, setPullRequestError] = useState<string | null>(null);
+
+  const handleCreatePullRequest = useCallback(async () => {
+    // The one confirm() gate on this page that isn't about discarding
+    // data: this is the single most consequential action here, the only
+    // one with a real, external side effect (a real branch pushed and a
+    // real PR opened on GitHub, visible to anyone with repo access) --
+    // unlike every other button, which only ever mutates CodePilot's own
+    // data. Clicking through this dialog *is* the "Human Approval" the
+    // pipeline is named for; there's no separate approve step before it.
+    const reviewStatus = issue?.code_change?.review?.status ?? null;
+    const confirmMessage =
+      reviewStatus === "changes_requested"
+        ? "The AI review requested changes for this code. Create a pull request anyway? " +
+          "This pushes a new branch and opens a real pull request on GitHub."
+        : "Create a pull request for this code? This pushes a new branch and opens a real " +
+          "pull request on GitHub.";
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    setPullRequestRequesting(true);
+    setPullRequestError(null);
+    try {
+      const updated = await apiFetch<Issue>(
+        `/api/repositories/${repositoryId}/issues/${issueId}/pull-requests`,
+        { method: "POST" },
+      );
+      setIssue(updated);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // Same reasoning as the other handlers' 409 handling: resync
+        // instead of showing a stale error.
+        await loadIssue();
+      } else if (error instanceof ApiError && error.status === 429) {
+        setPullRequestError(
+          "Too many pull request requests — wait a moment and try again.",
+        );
+      } else {
+        setPullRequestError("Couldn't create the pull request, try again.");
+      }
+    } finally {
+      setPullRequestRequesting(false);
+    }
+  }, [issue, repositoryId, issueId, loadIssue]);
+
   // Protected route: bounce signed-out visitors back to the landing page.
   useEffect(() => {
     if (!userLoading && !user) {
@@ -904,25 +1086,41 @@ export default function IssueDetailPage() {
   const isReviewPending = issue?.code_change?.review
     ? isPendingReviewStatus(issue.code_change.review.status)
     : false;
+  const isPullRequestPending = issue?.code_change?.pull_request
+    ? isPendingPRStatus(issue.code_change.pull_request.status)
+    : false;
 
   // Poll while the issue is queued/planning, its code_change is
-  // queued/generating, its test_run is queued/running/fixing, or its
-  // review is queued/reviewing, so any of the four resolves without a
-  // manual refresh -- stopping once none is pending any more. One shared
-  // interval (rather than a fourth one scoped to review) since all four
-  // conditions just mean "re-fetch this same issue"; `loadIssue` itself
-  // already guards against out-of-order responses via `issueRequestId`.
-  // Same pattern as the list page's poll, scoped to this one issue instead
-  // of a list.
+  // queued/generating, its test_run is queued/running/fixing, its review
+  // is queued/reviewing, or its pull_request is queued/creating, so any of
+  // the five resolves without a manual refresh -- stopping once none is
+  // pending any more. One shared interval (rather than a fifth one scoped
+  // to pull_request) since all five conditions just mean "re-fetch this
+  // same issue"; `loadIssue` itself already guards against out-of-order
+  // responses via `issueRequestId`. Same pattern as the list page's poll,
+  // scoped to this one issue instead of a list.
   useEffect(() => {
-    if (!isPending && !isGenerationPending && !isTestRunPending && !isReviewPending) {
+    if (
+      !isPending &&
+      !isGenerationPending &&
+      !isTestRunPending &&
+      !isReviewPending &&
+      !isPullRequestPending
+    ) {
       return;
     }
     const intervalId = setInterval(() => {
       loadIssue();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(intervalId);
-  }, [isPending, isGenerationPending, isTestRunPending, isReviewPending, loadIssue]);
+  }, [
+    isPending,
+    isGenerationPending,
+    isTestRunPending,
+    isReviewPending,
+    isPullRequestPending,
+    loadIssue,
+  ]);
 
   if (userLoading || !user) {
     return (
@@ -1118,6 +1316,38 @@ export default function IssueDetailPage() {
                 ) : (
                   <p className="text-sm text-zinc-500 dark:text-zinc-400">
                     No review has been requested for this issue yet.
+                  </p>
+                )}
+              </div>
+            ) : null}
+
+            {issue.code_change?.test_run?.status === "passed" ? (
+              <div className="flex flex-col gap-4 border-t border-black/[.08] pt-6 dark:border-white/[.145]">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <SectionHeading>Pull request</SectionHeading>
+                  {issue.code_change.pull_request?.status !== "created" ? (
+                    <button
+                      type="button"
+                      onClick={handleCreatePullRequest}
+                      disabled={pullRequestRequesting || isPullRequestPending}
+                      className="shrink-0 rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-950 dark:hover:bg-zinc-200"
+                    >
+                      {pullRequestButtonLabel(issue.code_change.pull_request, pullRequestRequesting)}
+                    </button>
+                  ) : null}
+                </div>
+
+                {pullRequestError ? (
+                  <p className="text-sm text-red-600 dark:text-red-400">
+                    {pullRequestError}
+                  </p>
+                ) : null}
+
+                {issue.code_change.pull_request ? (
+                  <PullRequestView pullRequest={issue.code_change.pull_request} />
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                    No pull request has been created for this issue yet.
                   </p>
                 )}
               </div>

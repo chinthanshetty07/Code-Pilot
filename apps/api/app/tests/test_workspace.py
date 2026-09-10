@@ -1,3 +1,4 @@
+import shutil
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -161,3 +162,63 @@ async def test_apply_diff_raises_when_it_does_not_match(workspace: Workspace) ->
     )
     with pytest.raises(WorkspaceError, match="git apply .* failed"):
         await workspace.apply_diff(bogus_diff)
+
+
+async def test_commit_all_creates_a_new_commit(workspace: Workspace) -> None:
+    workspace.edit_file("src/app.py", "hello {name}", "hi {name}")
+    await workspace.commit_all("Say hi instead of hello")
+
+    log = await workspace._run_git("log", "--oneline")
+    assert len(log.strip().splitlines()) == 2
+
+
+async def test_commit_all_leaves_a_clean_working_tree(workspace: Workspace) -> None:
+    workspace.create_file("src/new_module.py", "VALUE = 42\n")
+    await workspace.commit_all("Add a new module")
+
+    status = await workspace._run_git("status", "--porcelain")
+    assert status.strip() == ""
+
+
+async def _make_bare_remote() -> Path:
+    """A real local bare repo standing in for a GitHub remote -- lets
+    push_branch's actual git mechanics be tested for real (same philosophy
+    as this file's other tests), without needing real GitHub credentials."""
+    root = Path(tempfile.mkdtemp(prefix="workspace-test-bare-remote-"))
+    remote = Workspace(root)
+    await remote._run_git("init", "-q", "--bare")
+    return root
+
+
+async def test_push_branch_creates_the_branch_on_a_real_remote(workspace: Workspace) -> None:
+    remote_root = await _make_bare_remote()
+    try:
+        workspace.edit_file("src/app.py", "hello {name}", "hi {name}")
+        await workspace.commit_all("Say hi instead of hello")
+
+        await workspace.push_branch(str(remote_root), "codepilot/test-branch")
+
+        refs = await workspace._run_git(
+            "ls-remote", str(remote_root), "refs/heads/codepilot/test-branch"
+        )
+        assert "refs/heads/codepilot/test-branch" in refs
+        local_head = (await workspace._run_git("rev-parse", "HEAD")).strip()
+        assert local_head in refs
+    finally:
+        shutil.rmtree(remote_root, ignore_errors=True)
+
+
+async def test_push_branch_never_leaks_a_token_from_the_remote_url_on_failure(
+    workspace: Workspace,
+) -> None:
+    """push_branch must sanitize _run_git's own error message -- it embeds
+    the full argv it ran, which for a real GitHub push includes remote_url
+    with an access token in it (see push_branch's docstring for why that
+    can never reach a stored/displayed error)."""
+    fake_token = "definitely-a-secret-token-12345"
+    bad_remote = f"https://x-access-token:{fake_token}@localhost/does/not/exist.git"
+
+    with pytest.raises(WorkspaceError) as exc_info:
+        await workspace.push_branch(bad_remote, "codepilot/test-branch")
+
+    assert fake_token not in str(exc_info.value)

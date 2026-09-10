@@ -9,10 +9,12 @@ from app.agents.reviewer import create_review
 from app.core.db import async_session_factory
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
+from app.models.pull_request import PullRequest
 from app.models.repository import Repository
 from app.models.review import Review
 from app.models.test_run import TestRun
 from app.services.indexing import index_repository
+from app.services.pull_requests import create_pull_request
 from app.services.test_runner import run_tests
 
 
@@ -113,3 +115,34 @@ async def create_review_task(ctx: dict, review_id: str) -> dict:
 
         await create_review(db, review)
         return {"status": review.status}
+
+
+async def create_pull_request_task(ctx: dict, pull_request_id: str) -> dict:
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(PullRequest)
+            .options(
+                # Same shape as create_review_task's eager-load chain, and
+                # for the same reason (see its comment): every relationship
+                # create_pull_request actually reads -- issue.repository,
+                # issue.plan, code_change.test_run, and code_change.review
+                # (for the PR body) -- must be listed here explicitly, or
+                # accessing it is a lazy load outside an awaited context
+                # and crashes with MissingGreenlet.
+                selectinload(PullRequest.code_change)
+                .selectinload(CodeChange.issue)
+                .selectinload(Issue.repository),
+                selectinload(PullRequest.code_change)
+                .selectinload(CodeChange.issue)
+                .selectinload(Issue.plan),
+                selectinload(PullRequest.code_change).selectinload(CodeChange.test_run),
+                selectinload(PullRequest.code_change).selectinload(CodeChange.review),
+            )
+            .where(PullRequest.id == uuid.UUID(pull_request_id))
+        )
+        pull_request = result.scalar_one_or_none()
+        if pull_request is None:
+            return {"status": "error", "message": "pull_request not found"}
+
+        await create_pull_request(db, pull_request)
+        return {"status": pull_request.status}

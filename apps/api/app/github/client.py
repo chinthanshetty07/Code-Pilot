@@ -92,5 +92,26 @@ class GitHubClient:
         response.raise_for_status()
         return response.content
 
+    async def create_pull_request(
+        self, full_name: str, *, title: str, body: str, head: str, base: str
+    ) -> dict:
+        response = await self._client.post(
+            f"/repos/{full_name}/pulls",
+            json={"title": title, "body": body, "head": head, "base": base},
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def build_authenticated_remote_url(access_token: str, full_name: str) -> str:
+    """An HTTPS remote URL with `access_token` embedded for git's own
+    (non-API) auth, used for `git push` -- GitHub's docs on personal
+    access tokens state the *username* in HTTPS Basic Auth isn't actually
+    used to authenticate, only the token/password is, so `x-access-token`
+    here is just a conventional, non-secret placeholder (the same one
+    GitHub Apps use), not a real credential in its own right.
+    """
+    return f"https://x-access-token:{access_token}@github.com/{full_name}.git"

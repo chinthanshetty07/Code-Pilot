@@ -51,6 +51,18 @@ class ReviewOut(BaseModel):
     created_at: datetime
 
 
+class PullRequestOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    status: str
+    error: str | None
+    branch_name: str | None
+    pr_number: int | None
+    pr_url: str | None
+    created_at: datetime
+
+
 class CodeChangeOut(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -62,6 +74,7 @@ class CodeChangeOut(BaseModel):
     created_at: datetime
     test_run: TestRunOut | None
     review: ReviewOut | None
+    pull_request: PullRequestOut | None
 
 
 class IssueOut(BaseModel):

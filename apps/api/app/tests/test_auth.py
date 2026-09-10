@@ -118,3 +118,11 @@ def test_create_review_requires_authentication(client: TestClient) -> None:
     response = client.post("/api/repositories/does-not-matter/issues/does-not-matter/reviews")
 
     assert response.status_code == 401
+
+
+def test_create_pull_request_requires_authentication(client: TestClient) -> None:
+    response = client.post(
+        "/api/repositories/does-not-matter/issues/does-not-matter/pull-requests"
+    )
+
+    assert response.status_code == 401

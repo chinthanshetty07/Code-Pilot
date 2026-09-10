@@ -124,6 +124,22 @@ export interface Review {
   created_at: string;
 }
 
+// status is "queued" | "creating" | "created" | "failed" on the backend
+// (app/models/pull_request.py) -- left as `string` for the same reason as
+// SearchResult.chunk_type above. Unlike TestRun/Review, "created" is a
+// true terminal state: a real PR now exists on GitHub, and the backend
+// won't let it be redone (see PullRequest's own docstring) -- only
+// "failed" can be retried.
+export interface PullRequest {
+  id: string;
+  status: string;
+  error: string | null;
+  branch_name: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  created_at: string;
+}
+
 // generation_status is "queued" | "generating" | "generated" | "failed" on
 // the backend (app/models/code_change.py) -- left as `string` for the same
 // reason as SearchResult.chunk_type above.
@@ -136,6 +152,7 @@ export interface CodeChange {
   created_at: string;
   test_run: TestRun | null;
   review: Review | null;
+  pull_request: PullRequest | null;
 }
 
 // planning_status is "queued" | "planning" | "planned" | "failed" on the

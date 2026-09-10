@@ -120,11 +120,51 @@ class Workspace:
 
     async def git_diff(self) -> str:
         """Stages everything (including new/deleted files) and diffs
-        against the initial commit -- the working tree itself is only ever
-        touched by this workspace's own tools, so this always reflects
-        exactly the agent's own edits."""
+        against HEAD -- in practice this has always meant "against the
+        initial commit", since nothing before Milestone 10 ever moved HEAD
+        (create_file/edit_file/apply_diff only ever touch the working
+        tree). commit_all below is the one exception: call this again
+        *after* commit_all and it diffs against that new commit instead,
+        not the original one -- effectively empty if nothing changed
+        since. No current caller does both on the same workspace, but a
+        future one reaching for "the whole diff so far" after a commit_all
+        should reach for something else, not this."""
         await self._run_git("add", "-A")
         return await self._run_git("diff", "--cached")
+
+    async def commit_all(self, message: str) -> None:
+        """Stages and commits everything currently in the working tree
+        (e.g. after apply_diff) as a new commit on top of the initial one
+        -- used by the pull request flow (Milestone 10) to give the pushed
+        branch a real commit of its own, rather than pushing an
+        uncommitted working tree (which git can't do at all). Moves HEAD
+        forward -- see git_diff's docstring for the one thing that changes
+        about it once this has been called."""
+        await self._run_git("add", "-A")
+        await self._run_git("commit", "-m", message)
+
+    async def push_branch(self, remote_url: str, branch_name: str) -> None:
+        """Pushes the current HEAD to a new branch on `remote_url` (an
+        HTTPS URL with an access token embedded for auth, e.g.
+        https://x-access-token:<token>@github.com/owner/repo.git) --
+        `HEAD:refs/heads/<branch_name>` creates the remote branch directly,
+        without needing a separate local `checkout -b` first.
+
+        Deliberately does not forward _run_git's own WorkspaceError message
+        on failure: that message embeds the full argv it ran, which here
+        would include remote_url and therefore the access token -- exactly
+        the string that must never end up in a stored/displayed error. The
+        real detail is still in the server log this is raised from (see
+        the caller's `logger.exception`), just never in anything
+        user-facing.
+        """
+        try:
+            await self._run_git("push", remote_url, f"HEAD:refs/heads/{branch_name}")
+        except WorkspaceError:
+            raise WorkspaceError(
+                f"git push to the remote failed (branch {branch_name!r}) -- check that "
+                "repository access is still valid"
+            ) from None
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)

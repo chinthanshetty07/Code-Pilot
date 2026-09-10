@@ -9,6 +9,7 @@ from app.models import Base
 
 if TYPE_CHECKING:
     from app.models.issue import Issue
+    from app.models.pull_request import PullRequest
     from app.models.review import Review
     from app.models.test_run import TestRun
 
@@ -37,5 +38,8 @@ class CodeChange(Base):
         back_populates="code_change", uselist=False, cascade="all, delete-orphan"
     )
     review: Mapped["Review | None"] = relationship(
+        back_populates="code_change", uselist=False, cascade="all, delete-orphan"
+    )
+    pull_request: Mapped["PullRequest | None"] = relationship(
         back_populates="code_change", uselist=False, cascade="all, delete-orphan"
     )

@@ -5,6 +5,7 @@ from app.core.config import get_settings
 from app.workers.tasks import (
     create_code_change_task,
     create_plan_task,
+    create_pull_request_task,
     create_review_task,
     create_test_run_task,
     index_repository_task,
@@ -35,6 +36,9 @@ class WorkerSettings:
         # bounded at MAX_TURNS=8 (see app/agents/reviewer.py), nowhere near
         # long enough to need more than the default job_timeout below.
         create_review_task,
+        # No LLM loop at all (see app/services/pull_requests.py) -- a fixed
+        # sequence of git/API calls, well within the default job_timeout.
+        create_pull_request_task,
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     job_timeout = 600
