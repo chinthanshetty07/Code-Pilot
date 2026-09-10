@@ -2,6 +2,7 @@ from arq.connections import RedisSettings
 from arq.worker import func
 
 from app.core.config import get_settings
+from app.core.logging import configure_logging, request_id_var
 from app.workers.tasks import (
     create_code_change_task,
     create_plan_task,
@@ -18,7 +19,27 @@ async def ping(ctx: dict) -> str:
     return "pong"
 
 
+async def on_startup(ctx: dict) -> None:
+    configure_logging()
+
+
+async def on_job_start(ctx: dict) -> None:
+    # Same ContextVar RequestIDMiddleware sets per HTTP request (see
+    # app/core/logging.py and app/core/middleware.py) -- here set once per
+    # background job instead, so every log line anywhere in a job's work
+    # (including inside an agent's own loop) carries the same id. No
+    # explicit reset on job end: arq runs each job as its own dedicated
+    # asyncio Task (confirmed against the installed arq version's actual
+    # source -- `self.loop.create_task(self.run_job(...))` per job), so
+    # this ContextVar set is already scoped to just that task and is
+    # discarded with it once the job finishes -- nothing to leak into the
+    # next one.
+    request_id_var.set(f"job:{ctx['job_id']}")
+
+
 class WorkerSettings:
+    on_startup = on_startup
+    on_job_start = on_job_start
     functions = [
         ping,
         index_repository_task,

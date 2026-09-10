@@ -40,12 +40,36 @@ class ToolSpec:
 
 
 @dataclass
+class TokenUsage:
+    """Real token counts from the provider's own response, for Milestone
+    11's cost tracking (see app/services/usage.py). For Gemini,
+    output_tokens already includes thinking/reasoning tokens (Gemini
+    bills them at the output rate -- see estimate_cost_usd's pricing
+    table comment) -- callers never need to add those separately."""
+
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass
 class LLMResponse:
     content: str | None
     tool_calls: list[ToolCall]
+    # None only for a response that never reached the provider at all
+    # (e.g. GroqLLMProvider's own tool-call-rejected recovery path below,
+    # which never made a real request) -- a genuine API response always
+    # carries usage for both providers in practice.
+    usage: TokenUsage | None = None
 
 
 class LLMProvider(Protocol):
+    @property
+    def model(self) -> str:
+        """The exact model name this provider is configured for -- needed
+        alongside a response's TokenUsage to price it correctly (see
+        app/services/usage.py's per-(provider, model) pricing table)."""
+        ...
+
     async def complete(
         self,
         messages: list[Message],
@@ -68,6 +92,10 @@ class GroqLLMProvider:
     def __init__(self, api_key: str, model: str) -> None:
         self._client = AsyncGroq(api_key=api_key)
         self._model = model
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def _to_api_messages(self, messages: list[Message], system: str) -> list[dict]:
         api_messages: list[dict] = [{"role": "system", "content": system}]
@@ -154,7 +182,15 @@ class GroqLLMProvider:
             ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments))
             for tc in (msg.tool_calls or [])
         ]
-        return LLMResponse(content=msg.content, tool_calls=tool_calls)
+        usage = (
+            TokenUsage(
+                input_tokens=response.usage.prompt_tokens,
+                output_tokens=response.usage.completion_tokens,
+            )
+            if response.usage is not None
+            else None
+        )
+        return LLMResponse(content=msg.content, tool_calls=tool_calls, usage=usage)
 
 
 class GeminiLLMProvider:
@@ -168,6 +204,10 @@ class GeminiLLMProvider:
     def __init__(self, api_key: str, model: str) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model = model
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def _to_contents(self, messages: list[Message]) -> list[genai_types.Content]:
         contents: list[genai_types.Content] = []
@@ -266,7 +306,18 @@ class GeminiLLMProvider:
             elif part.text:
                 text_parts.append(part.text)
 
-        return LLMResponse(content="".join(text_parts) or None, tool_calls=tool_calls)
+        usage = None
+        if response.usage_metadata is not None:
+            meta = response.usage_metadata
+            # thoughts_token_count (Gemini 3.x's reasoning tokens) is
+            # billed at the output rate, not tracked separately -- see
+            # TokenUsage's docstring and estimate_cost_usd's pricing table
+            # comment (app/services/usage.py).
+            usage = TokenUsage(
+                input_tokens=meta.prompt_token_count or 0,
+                output_tokens=(meta.candidates_token_count or 0) + (meta.thoughts_token_count or 0),
+            )
+        return LLMResponse(content="".join(text_parts) or None, tool_calls=tool_calls, usage=usage)
 
 
 def get_llm_provider(provider_name: str) -> LLMProvider:

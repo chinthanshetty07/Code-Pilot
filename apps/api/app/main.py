@@ -8,9 +8,11 @@ from app.api.issues import router as issues_router
 from app.api.repositories import router as repositories_router
 from app.core.config import get_settings
 from app.core.errors import AppError, app_error_handler, http_exception_handler
+from app.core.logging import configure_logging
 from app.core.middleware import RequestIDMiddleware
 
 settings = get_settings()
+configure_logging()
 
 
 def create_app() -> FastAPI:

@@ -15,6 +15,7 @@ from app.llm.provider import Message, ToolCall, ToolSpec, get_llm_provider
 from app.models.review import Review
 from app.services.github_accounts import get_access_token
 from app.services.search import search_code
+from app.services.usage import record_llm_usage
 from app.services.workspace import Workspace, WorkspaceError, create_workspace
 
 logger = logging.getLogger(__name__)
@@ -161,7 +162,8 @@ async def create_review(db: AsyncSession, review: Review) -> None:
         if code_change.diff and code_change.diff.strip():
             await workspace.apply_diff(code_change.diff)
 
-        provider = get_llm_provider(get_settings().reviewer_llm_provider)
+        provider_name = get_settings().reviewer_llm_provider
+        provider = get_llm_provider(provider_name)
         messages: list[Message] = [
             Message(role="user", content=_build_task_description(issue, plan, code_change))
         ]
@@ -169,6 +171,15 @@ async def create_review(db: AsyncSession, review: Review) -> None:
 
         for _turn in range(MAX_TURNS):
             response = await provider.complete(messages, tools=REVIEWER_TOOLS, system=SYSTEM_PROMPT)
+            await record_llm_usage(
+                db,
+                agent="reviewer",
+                provider=provider_name,
+                model=provider.model,
+                usage=response.usage,
+                repository_id=repository.id,
+                issue_id=issue.id,
+            )
 
             if not response.tool_calls:
                 messages.append(Message(role="assistant", content=response.content))
@@ -222,6 +233,15 @@ async def create_review(db: AsyncSession, review: Review) -> None:
                     tools=[SUBMIT_REVIEW_TOOL],
                     system=SYSTEM_PROMPT,
                     force_tool="submit_review",
+                )
+                await record_llm_usage(
+                    db,
+                    agent="reviewer",
+                    provider=provider_name,
+                    model=provider.model,
+                    usage=response.usage,
+                    repository_id=repository.id,
+                    issue_id=issue.id,
                 )
                 if response.tool_calls and response.tool_calls[0].name == "submit_review":
                     call = response.tool_calls[0]

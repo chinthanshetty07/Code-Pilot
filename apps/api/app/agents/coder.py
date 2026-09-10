@@ -15,6 +15,7 @@ from app.models.code_change import CodeChange
 from app.models.test_run import TestRun
 from app.services.github_accounts import get_access_token
 from app.services.search import search_code
+from app.services.usage import record_llm_usage
 from app.services.workspace import Workspace, WorkspaceError, create_workspace
 
 logger = logging.getLogger(__name__)
@@ -217,9 +218,11 @@ async def _execute_tool(
 
 async def _run_coding_loop(
     provider: LLMProvider,
+    provider_name: str,
     workspace: Workspace,
     db: AsyncSession,
     repository_id,
+    issue_id,
     system: str,
     initial_message: str,
 ) -> _CodeChangeResult:
@@ -231,12 +234,24 @@ async def _run_coding_loop(
     plain-language reinforcement together). Used for both a fresh code
     generation and a fix attempt -- they differ only in the system prompt
     and the message that starts the conversation, not in how convergence
-    is reached."""
+    is reached. Both are recorded under agent="coder" for Milestone 11's
+    cost tracking (see app/services/usage.py) -- a fix pass is still the
+    Coder agent doing coder-agent work, just with different context; the
+    cost dashboard doesn't need a fourth bucket to see that."""
     messages: list[Message] = [Message(role="user", content=initial_message)]
     result: _CodeChangeResult | None = None
 
     for _turn in range(MAX_TURNS):
         response = await provider.complete(messages, tools=CODER_TOOLS, system=system)
+        await record_llm_usage(
+            db,
+            agent="coder",
+            provider=provider_name,
+            model=provider.model,
+            usage=response.usage,
+            repository_id=repository_id,
+            issue_id=issue_id,
+        )
 
         if not response.tool_calls:
             messages.append(Message(role="assistant", content=response.content))
@@ -283,6 +298,15 @@ async def _run_coding_loop(
             )
             response = await provider.complete(
                 messages, tools=[FINISH_TOOL], system=system, force_tool="finish"
+            )
+            await record_llm_usage(
+                db,
+                agent="coder",
+                provider=provider_name,
+                model=provider.model,
+                usage=response.usage,
+                repository_id=repository_id,
+                issue_id=issue_id,
             )
             if response.tool_calls and response.tool_calls[0].name == "finish":
                 call = response.tool_calls[0]
@@ -334,12 +358,15 @@ async def create_code_change(db: AsyncSession, code_change: CodeChange) -> None:
         access_token = await get_access_token(db, repository.owner_id)
         workspace = await create_workspace(access_token, repository.full_name)
 
-        provider = get_llm_provider(get_settings().coder_llm_provider)
+        provider_name = get_settings().coder_llm_provider
+        provider = get_llm_provider(provider_name)
         result = await _run_coding_loop(
             provider,
+            provider_name,
             workspace,
             db,
             repository.id,
+            issue.id,
             SYSTEM_PROMPT,
             _build_task_description(issue, plan),
         )
@@ -383,12 +410,15 @@ async def fix_code_change(
     persisting both -- this function doesn't commit anything itself, it's
     pure agent-loop logic, the same division of responsibility
     create_code_change has with its own caller."""
-    provider = get_llm_provider(get_settings().coder_llm_provider)
+    provider_name = get_settings().coder_llm_provider
+    provider = get_llm_provider(provider_name)
     result = await _run_coding_loop(
         provider,
+        provider_name,
         workspace,
         db,
         repository_id,
+        issue.id,
         FIX_SYSTEM_PROMPT,
         _build_fix_description(issue, plan, code_change, test_run),
     )

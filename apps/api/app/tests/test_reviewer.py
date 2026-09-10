@@ -11,13 +11,14 @@ from sqlalchemy.orm import selectinload
 from app.agents import reviewer as reviewer_module
 from app.agents.reviewer import FORCE_SUBMIT_ATTEMPTS, MAX_TURNS, create_review
 from app.core.db import async_session_factory
-from app.llm.provider import LLMResponse, ToolCall
+from app.llm.provider import LLMResponse, TokenUsage, ToolCall
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
 from app.models.plan import Plan
 from app.models.repository import Repository
 from app.models.review import Review
 from app.models.test_run import TestRun
+from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.services.workspace import Workspace
 
@@ -391,3 +392,48 @@ async def test_create_review_fails_after_exhausting_all_attempts(
     reloaded = await _reload(review)
     assert reloaded.status == "failed"
     assert "did not submit a verdict" in (reloaded.error or "")
+
+
+async def test_create_review_records_token_usage(
+    monkeypatch: pytest.MonkeyPatch, review: Review
+) -> None:
+    """Milestone 11: every real provider.complete() call must be recorded
+    for cost tracking (see app/services/usage.py), tagged agent="reviewer"."""
+    fake_provider = AsyncMock()
+    fake_provider.model = "test-model"
+    fake_provider.complete = AsyncMock(
+        return_value=LLMResponse(
+            content=None,
+            tool_calls=[_submit_call()],
+            usage=TokenUsage(input_tokens=300, output_tokens=80),
+        )
+    )
+    _patch_reviewer(monkeypatch, fake_provider)
+
+    issue_id = review.code_change.issue_id
+
+    async with async_session_factory() as db:
+        db_review = await db.get(
+            Review,
+            review.id,
+            options=[
+                selectinload(Review.code_change)
+                .selectinload(CodeChange.issue)
+                .selectinload(Issue.repository),
+                selectinload(Review.code_change)
+                .selectinload(CodeChange.issue)
+                .selectinload(Issue.plan),
+                selectinload(Review.code_change).selectinload(CodeChange.test_run),
+            ],
+        )
+        await create_review(db, db_review)
+
+    async with async_session_factory() as db:
+        result = await db.execute(select(UsageRecord).where(UsageRecord.issue_id == issue_id))
+        records = list(result.scalars().all())
+
+    assert len(records) == 1
+    assert records[0].agent == "reviewer"
+    assert records[0].model == "test-model"
+    assert records[0].input_tokens == 300
+    assert records[0].output_tokens == 80

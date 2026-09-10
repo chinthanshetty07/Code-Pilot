@@ -10,6 +10,7 @@ import type {
   PullRequest,
   Review,
   TestRun,
+  UsageSummary,
 } from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCurrentUser } from "@/hooks/use-current-user";
@@ -829,6 +830,52 @@ function PullRequestView({ pullRequest }: { pullRequest: PullRequest }) {
   );
 }
 
+const USAGE_AGENT_LABEL: Record<string, string> = {
+  planner: "Planner",
+  coder: "Coder",
+  reviewer: "Reviewer",
+};
+
+// Costs here are fractions of a cent in practice -- 4 decimal places is
+// enough precision to show a real nonzero number instead of a
+// rounded-away "$0.00" for a normal-sized call.
+function formatUsd(amount: number): string {
+  return `$${amount.toFixed(4)}`;
+}
+
+// Purely informational -- no button, no pending/error state of its own (a
+// failed fetch just means the strip doesn't render; this is supplementary
+// context, not a pipeline stage the user drives). Renders nothing once
+// there's genuinely nothing to show yet (a fresh issue with no agent
+// calls made), rather than a "$0.0000" that would just be noise before
+// the Planner has even run.
+function UsageSummaryView({ summary }: { summary: UsageSummary }) {
+  if (summary.total_input_tokens === 0 && summary.total_output_tokens === 0) {
+    return null;
+  }
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-black/[.08] bg-white px-4 py-3 dark:border-white/[.145] dark:bg-zinc-900">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm font-medium text-zinc-950 dark:text-zinc-50">
+          AI usage (estimated)
+        </span>
+        <span className="font-mono text-sm text-zinc-600 dark:text-zinc-400">
+          {formatUsd(summary.total_estimated_cost_usd)}
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+        {summary.by_agent.map((agent) => (
+          <span key={agent.agent}>
+            {USAGE_AGENT_LABEL[agent.agent] ?? agent.agent}:{" "}
+            {(agent.input_tokens + agent.output_tokens).toLocaleString()} tokens (
+            {formatUsd(agent.estimated_cost_usd)})
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function IssueDetailPage() {
   const { id: repositoryId, issueId } = useParams<{
     id: string;
@@ -887,6 +934,29 @@ export default function IssueDetailPage() {
     setIssueLoading(true);
     return loadIssue();
   }, [loadIssue]);
+
+  // --- AI usage (Milestone 11 cost tracking) ---
+  // Purely derived, read-only context -- no request-id guard like
+  // loadIssue's, since a stray stale response here would only make this
+  // one supplementary strip flicker to an older number for a moment, not
+  // show wrong data about which pipeline stage the issue is in. Refetched
+  // whenever `issue` changes so it stays in sync with however many agent
+  // calls have happened so far, including mid-poll.
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
+
+  useEffect(() => {
+    if (!issue) {
+      return;
+    }
+    apiFetch<UsageSummary>(
+      `/api/repositories/${repositoryId}/issues/${issueId}/usage`,
+    )
+      .then(setUsage)
+      .catch(() => {
+        // Non-critical: leave whatever was last shown (or nothing) rather
+        // than surface an error for a purely supplementary metric.
+      });
+  }, [issue, repositoryId, issueId]);
 
   // --- Code generation (Coder agent) ---
   const [generateRequesting, setGenerateRequesting] = useState(false);
@@ -1198,6 +1268,8 @@ export default function IssueDetailPage() {
                 {issue.description}
               </p>
             </div>
+
+            {usage ? <UsageSummaryView summary={usage} /> : null}
 
             {issue.planning_status === "failed" ? (
               <div className="flex flex-col gap-2">

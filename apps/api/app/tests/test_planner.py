@@ -8,10 +8,11 @@ from sqlalchemy import delete, select
 from app.agents import planner as planner_module
 from app.agents.planner import FORCE_SUBMIT_ATTEMPTS, MAX_TURNS, create_plan
 from app.core.db import async_session_factory
-from app.llm.provider import LLMResponse, ToolCall
+from app.llm.provider import LLMResponse, TokenUsage, ToolCall
 from app.models.issue import Issue
 from app.models.plan import Plan
 from app.models.repository import Repository
+from app.models.usage_record import UsageRecord
 from app.models.user import User
 
 
@@ -247,3 +248,39 @@ async def test_create_plan_retries_a_forced_attempt_that_fails(
     assert fake_provider.complete.await_count == MAX_TURNS + 2
     reloaded = await _reload(issue)
     assert reloaded.planning_status == "planned"
+
+
+async def test_create_plan_records_token_usage(
+    monkeypatch: pytest.MonkeyPatch, issue: Issue
+) -> None:
+    """Milestone 11: every real provider.complete() call must be recorded
+    for cost tracking (see app/services/usage.py), tagged with this
+    issue's own repository -- not just discarded once the response is
+    read."""
+    fake_provider = AsyncMock()
+    fake_provider.model = "test-model"
+    fake_provider.complete = AsyncMock(
+        return_value=LLMResponse(
+            content=None,
+            tool_calls=[_submit_plan_call()],
+            usage=TokenUsage(input_tokens=100, output_tokens=50),
+        )
+    )
+    monkeypatch.setattr(planner_module, "get_llm_provider", lambda _name: fake_provider)
+
+    async with async_session_factory() as db:
+        db_issue = await db.get(Issue, issue.id)
+        await create_plan(db, db_issue)
+
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(UsageRecord).where(UsageRecord.issue_id == issue.id)
+        )
+        records = list(result.scalars().all())
+
+    assert len(records) == 1
+    assert records[0].agent == "planner"
+    assert records[0].model == "test-model"
+    assert records[0].input_tokens == 100
+    assert records[0].output_tokens == 50
+    assert records[0].repository_id == issue.repository_id

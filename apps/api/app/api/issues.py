@@ -15,6 +15,8 @@ from app.models.review import Review
 from app.models.test_run import TestRun
 from app.models.user import User
 from app.schemas.issue import IssueCreateIn, IssueOut
+from app.schemas.usage import UsageSummaryOut
+from app.services.usage import UsageSummary, get_issue_usage_summary
 
 router = APIRouter(tags=["issues"])
 
@@ -388,3 +390,16 @@ async def create_pull_request(
     await pool.enqueue_job("create_pull_request_task", str(pull_request.id))
 
     return issue
+
+
+@router.get(
+    "/api/repositories/{repository_id}/issues/{issue_id}/usage", response_model=UsageSummaryOut
+)
+async def get_issue_usage(
+    repository_id: str,
+    issue_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UsageSummary:
+    issue = await _get_owned_issue(db, repository_id, issue_id, user)
+    return await get_issue_usage_summary(db, issue.id)

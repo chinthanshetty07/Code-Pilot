@@ -168,3 +168,23 @@ export interface Issue {
   plan: Plan | null;
   code_change: CodeChange | null;
 }
+
+// agent is "planner" | "coder" | "reviewer" on the backend
+// (app/services/usage.py) -- left as `string` for the same reason as
+// SearchResult.chunk_type above. estimated_cost_usd is exactly that: a
+// cost the free-tier Groq/Gemini calls this app actually makes never
+// really incur, priced at each model's published paid-tier rate so the
+// number means something (see usage.py's pricing table comment).
+export interface AgentUsage {
+  agent: string;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost_usd: number;
+}
+
+export interface UsageSummary {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_estimated_cost_usd: number;
+  by_agent: AgentUsage[];
+}

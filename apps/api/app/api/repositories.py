@@ -14,7 +14,9 @@ from app.models.repository import Repository
 from app.models.user import User
 from app.schemas.repository import GithubRepoSummaryOut, RepositoryCreateIn, RepositoryOut
 from app.schemas.search import SearchResultOut
+from app.schemas.usage import UsageSummaryOut
 from app.services.search import SearchResult, search_code
+from app.services.usage import UsageSummary, get_repository_usage_summary
 
 router = APIRouter(tags=["repositories"])
 
@@ -164,3 +166,16 @@ async def search_repository(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
 
     return await search_code(db, repository.id, q, limit)
+
+
+@router.get("/api/repositories/{repository_id}/usage", response_model=UsageSummaryOut)
+async def get_repository_usage(
+    repository_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UsageSummary:
+    repository = await db.get(Repository, repository_id)
+    if repository is None or repository.owner_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+
+    return await get_repository_usage_summary(db, repository.id)

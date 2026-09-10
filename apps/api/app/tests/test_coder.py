@@ -10,12 +10,13 @@ from sqlalchemy import delete, select
 from app.agents import coder as coder_module
 from app.agents.coder import FORCE_FINISH_ATTEMPTS, MAX_TURNS, create_code_change, fix_code_change
 from app.core.db import async_session_factory
-from app.llm.provider import LLMResponse, ToolCall
+from app.llm.provider import LLMResponse, TokenUsage, ToolCall
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
 from app.models.plan import Plan
 from app.models.repository import Repository
 from app.models.test_run import TestRun
+from app.models.usage_record import UsageRecord
 from app.models.user import User
 from app.services.workspace import Workspace
 
@@ -347,3 +348,52 @@ async def test_fix_code_change_edits_and_returns_summary(
     assert any(
         "expected 'Hello alice'" in (m.content or "") for m in first_call_messages
     )
+
+
+async def test_create_code_change_records_token_usage(
+    monkeypatch: pytest.MonkeyPatch, code_change: CodeChange
+) -> None:
+    """Milestone 11: every real provider.complete() call must be recorded
+    for cost tracking (see app/services/usage.py), tagged agent="coder"
+    regardless of how many turns it took."""
+    edit_call = ToolCall(
+        id="call_edit",
+        name="edit_file",
+        arguments={
+            "path": "src/app.py",
+            "old_string": "hello {name}",
+            "new_string": "hello {name.capitalize()}",
+        },
+    )
+    fake_provider = AsyncMock()
+    fake_provider.model = "test-model"
+    fake_provider.complete = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content=None,
+                tool_calls=[edit_call],
+                usage=TokenUsage(input_tokens=200, output_tokens=40),
+            ),
+            LLMResponse(
+                content=None,
+                tool_calls=[_finish_call()],
+                usage=TokenUsage(input_tokens=250, output_tokens=20),
+            ),
+        ]
+    )
+    _patch_coder(monkeypatch, fake_provider)
+
+    async with async_session_factory() as db:
+        db_code_change = await _load_full(db, code_change.id)
+        await create_code_change(db, db_code_change)
+
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(UsageRecord).where(UsageRecord.issue_id == code_change.issue_id)
+        )
+        records = list(result.scalars().all())
+
+    assert len(records) == 2
+    assert all(r.agent == "coder" and r.model == "test-model" for r in records)
+    assert sum(r.input_tokens for r in records) == 450
+    assert sum(r.output_tokens for r in records) == 60

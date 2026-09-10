@@ -9,6 +9,7 @@ from app.llm.provider import Message, ToolSpec, get_llm_provider
 from app.models.issue import Issue
 from app.models.plan import Plan
 from app.services.search import search_code
+from app.services.usage import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,8 @@ async def create_plan(db: AsyncSession, issue: Issue) -> None:
     await db.commit()
 
     try:
-        provider = get_llm_provider(get_settings().planner_llm_provider)
+        provider_name = get_settings().planner_llm_provider
+        provider = get_llm_provider(provider_name)
         messages: list[Message] = [Message(role="user", content=issue.description)]
         plan_data: _PlanData | None = None
         search_call_count = 0
@@ -126,6 +128,15 @@ async def create_plan(db: AsyncSession, issue: Issue) -> None:
         for _turn in range(MAX_TURNS):
             response = await provider.complete(
                 messages, tools=[SEARCH_CODE_TOOL, SUBMIT_PLAN_TOOL], system=SYSTEM_PROMPT
+            )
+            await record_llm_usage(
+                db,
+                agent="planner",
+                provider=provider_name,
+                model=provider.model,
+                usage=response.usage,
+                repository_id=issue.repository_id,
+                issue_id=issue.id,
             )
 
             if not response.tool_calls:
@@ -218,6 +229,15 @@ async def create_plan(db: AsyncSession, issue: Issue) -> None:
                     tools=[SUBMIT_PLAN_TOOL],
                     system=SYSTEM_PROMPT,
                     force_tool="submit_plan",
+                )
+                await record_llm_usage(
+                    db,
+                    agent="planner",
+                    provider=provider_name,
+                    model=provider.model,
+                    usage=response.usage,
+                    repository_id=issue.repository_id,
+                    issue_id=issue.id,
                 )
 
                 if response.tool_calls and response.tool_calls[0].name == "submit_plan":
