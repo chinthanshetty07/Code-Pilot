@@ -1,9 +1,9 @@
-import json
 import logging
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.tools import SEARCH_CODE_TOOL, SEARCH_RESULT_LIMIT, format_search_results
 from app.core.config import get_settings
 from app.llm.provider import Message, ToolSpec, get_llm_provider
 from app.models.issue import Issue
@@ -13,7 +13,6 @@ from app.services.search import search_code
 logger = logging.getLogger(__name__)
 
 MAX_TURNS = 8
-SEARCH_RESULT_LIMIT = 10
 # Once a model has made this many search_code calls, a reminder is appended
 # to its next search result nudging it toward submit_plan. Purely a nudge --
 # the free-choice phase can still run out without ever submitting.
@@ -22,21 +21,6 @@ SEARCH_NUDGE_THRESHOLD = 3
 # this many additional attempts explicitly force submit_plan (see the
 # comment where it's used) before giving up entirely.
 FORCE_SUBMIT_ATTEMPTS = 3
-
-SEARCH_CODE_TOOL = ToolSpec(
-    name="search_code",
-    description=(
-        "Semantic search over this repository's indexed code. Returns the most relevant "
-        "code chunks (file path, symbol, line range, content) for a natural-language or "
-        "code-like query. Call this multiple times with different queries to build a "
-        "complete picture -- e.g. the reported symptom, the likely component, related tests."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {"query": {"type": "string", "description": "What to search for"}},
-        "required": ["query"],
-    },
-)
 
 SUBMIT_PLAN_TOOL = ToolSpec(
     name="submit_plan",
@@ -124,23 +108,6 @@ class _PlanData(BaseModel):
     risks: list[str]
 
 
-def _format_search_results(results: list) -> str:
-    return json.dumps(
-        [
-            {
-                "file_path": r.file_path,
-                "chunk_type": r.chunk_type,
-                "symbol_name": r.symbol_name,
-                "start_line": r.start_line,
-                "end_line": r.end_line,
-                "content": r.content,
-                "score": round(r.score, 3),
-            }
-            for r in results
-        ]
-    )
-
-
 async def create_plan(db: AsyncSession, issue: Issue) -> None:
     """Run the Planner agent for one issue: search_code + submit_plan tool
     loop, capped at MAX_TURNS. Never raises -- failures are recorded on the
@@ -192,7 +159,7 @@ async def create_plan(db: AsyncSession, issue: Issue) -> None:
                         call.arguments.get("query", ""),
                         limit=SEARCH_RESULT_LIMIT,
                     )
-                    content = _format_search_results(results)
+                    content = format_search_results(results)
                     if search_call_count >= SEARCH_NUDGE_THRESHOLD:
                         content += (
                             f"\n\n[You have now called search_code {search_call_count} "

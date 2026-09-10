@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import type { Issue, Plan } from "@codepilot/shared-types";
+import type { CodeChange, Issue, Plan } from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
@@ -35,6 +35,32 @@ const PLANNING_STATUS_LABEL: Record<string, string> = {
   queued: "Queued…",
   planning: "Planning…",
   planned: "Planned",
+  failed: "Failed",
+};
+
+// Statuses that mean "the Coder agent is on it" -- same idea as
+// `PENDING_PLANNING_STATUSES` above, scoped to `code_change.generation_status`
+// instead of `issue.planning_status`.
+const PENDING_GENERATION_STATUSES = new Set(["queued", "generating"]);
+
+function isPendingGenerationStatus(status: string): boolean {
+  return PENDING_GENERATION_STATUSES.has(status);
+}
+
+// Dot color + label per `generation_status`. Exact same convention as
+// `PLANNING_STATUS_DOT_CLASS`/`PLANNING_STATUS_LABEL` above, just for the
+// Coder agent's status instead of the Planner's.
+const GENERATION_STATUS_DOT_CLASS: Record<string, string> = {
+  queued: "bg-amber-400",
+  generating: "bg-amber-400 animate-pulse",
+  generated: "bg-emerald-500",
+  failed: "bg-red-500",
+};
+
+const GENERATION_STATUS_LABEL: Record<string, string> = {
+  queued: "Queued…",
+  generating: "Generating…",
+  generated: "Generated",
   failed: "Failed",
 };
 
@@ -165,6 +191,141 @@ function PlanView({ plan }: { plan: Plan }) {
   );
 }
 
+// Button label for the generate/regenerate action, mirroring
+// `indexButtonLabel`'s convention on repositories/page.tsx: reflects the
+// in-flight POST first, then falls back to the persisted status.
+function generateButtonLabel(
+  codeChange: CodeChange | null,
+  isRequesting: boolean,
+): string {
+  if (isRequesting) {
+    return "Starting…";
+  }
+  if (!codeChange) {
+    return "Generate code";
+  }
+  switch (codeChange.generation_status) {
+    case "queued":
+      return "Queued…";
+    case "generating":
+      return "Generating…";
+    case "generated":
+    case "failed":
+      return "Regenerate";
+    default:
+      return "Generate code";
+  }
+}
+
+// Per-line color for a unified diff, by prefix only -- deliberately not a
+// real diff parse (no hunk/file-boundary awareness), per the "keep it
+// simple" steer for this view. This also colors the `+++`/`---` file-header
+// lines the same as added/removed content lines, since both start with the
+// same character -- an intentional simplification, not a bug.
+function diffLineClass(line: string): string {
+  if (line.startsWith("@@")) {
+    return "text-sky-700 dark:text-sky-400";
+  }
+  if (line.startsWith("+")) {
+    return "text-emerald-700 dark:text-emerald-400";
+  }
+  if (line.startsWith("-")) {
+    return "text-red-700 dark:text-red-400";
+  }
+  return "text-zinc-800 dark:text-zinc-200";
+}
+
+// Renders a unified diff string readably: monospace, one `<span>` per line
+// (so `<pre><code>` only ever contains phrasing content) colored by
+// `diffLineClass`. `lines` is derived fresh from `diff` on every render and
+// never reordered, so the array index is a stable, safe `key`.
+function DiffView({ diff }: { diff: string }) {
+  const lines = diff.split("\n");
+  return (
+    <pre className="max-h-[32rem] overflow-auto rounded-md bg-black/[.03] px-3 py-2 text-xs dark:bg-white/[.04]">
+      <code>
+        {lines.map((line, index) => (
+          <span key={index} className={`block ${diffLineClass(line)}`}>
+            {line.length > 0 ? line : " "}
+          </span>
+        ))}
+      </code>
+    </pre>
+  );
+}
+
+// Mirrors `PlanView` above: status row first (same dot+label+relative-time
+// convention as the page header), then a status-dependent content region
+// (pending spinner / red error box / summary+diff), same layering as the
+// planning_status handling in the main component below.
+function CodeChangeView({ codeChange }: { codeChange: CodeChange }) {
+  const isPending = isPendingGenerationStatus(codeChange.generation_status);
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          aria-hidden
+          className={`h-2 w-2 shrink-0 rounded-full ${
+            GENERATION_STATUS_DOT_CLASS[codeChange.generation_status] ?? ""
+          }`}
+        />
+        <span className="text-sm text-zinc-600 dark:text-zinc-400">
+          {GENERATION_STATUS_LABEL[codeChange.generation_status] ??
+            codeChange.generation_status}
+          {" · "}
+          <span
+            title={formatAbsoluteTime(codeChange.created_at)}
+            suppressHydrationWarning
+          >
+            {formatRelativeTime(codeChange.created_at)}
+          </span>
+        </span>
+      </div>
+
+      {codeChange.generation_status === "failed" ? (
+        <div className="flex flex-col gap-2">
+          <SectionHeading>Code generation failed</SectionHeading>
+          <p className="whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-400">
+            {codeChange.generation_error ??
+              "Something went wrong while generating code for this issue."}
+          </p>
+        </div>
+      ) : isPending ? (
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400"
+        >
+          <span
+            aria-hidden
+            className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-400"
+          />
+          <span>
+            {codeChange.generation_status === "queued"
+              ? "Queued for code generation…"
+              : "Generating…"}{" "}
+            This usually takes 15–60+ seconds.
+          </span>
+        </div>
+      ) : codeChange.generation_status === "generated" ? (
+        <div className="flex flex-col gap-3">
+          {codeChange.summary ? (
+            <p className="text-sm text-zinc-800 dark:text-zinc-200">
+              {codeChange.summary}
+            </p>
+          ) : null}
+          {codeChange.diff ? (
+            <DiffView diff={codeChange.diff} />
+          ) : (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              No diff available.
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function IssueDetailPage() {
   const { id: repositoryId, issueId } = useParams<{
     id: string;
@@ -224,6 +385,60 @@ export default function IssueDetailPage() {
     return loadIssue();
   }, [loadIssue]);
 
+  // --- Code generation (Coder agent) ---
+  const [generateRequesting, setGenerateRequesting] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+
+  const handleGenerateCode = useCallback(async () => {
+    // A code_change already sitting in a terminal state means this call
+    // discards it and starts over (the backend keeps no history of past
+    // attempts) -- gate that specifically so a regenerate is a deliberate
+    // choice, not a stray click. A first-time generate (no code_change yet)
+    // skips this prompt entirely.
+    const codeChange = issue?.code_change ?? null;
+    const isRegenerate =
+      codeChange !== null &&
+      (codeChange.generation_status === "generated" ||
+        codeChange.generation_status === "failed");
+    if (
+      isRegenerate &&
+      !window.confirm(
+        "Regenerate code for this issue? This replaces the current diff and can't be undone.",
+      )
+    ) {
+      return;
+    }
+
+    setGenerateRequesting(true);
+    setGenerateError(null);
+    try {
+      const updated = await apiFetch<Issue>(
+        `/api/repositories/${repositoryId}/issues/${issueId}/code-changes`,
+        { method: "POST" },
+      );
+      setIssue(updated);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // Someone else (another tab, or a race) already has generation
+        // queued/in progress, or the plan isn't ready after all -- resync
+        // rather than show a stale error, same convention as the index
+        // button's 409 handling in repositories/page.tsx.
+        await loadIssue();
+      } else if (error instanceof ApiError && error.status === 429) {
+        // The endpoint is rate-limited to 10 req/min -- call that out
+        // specifically, same convention as the issue-submit and search
+        // forms' 429 handling.
+        setGenerateError(
+          "Too many code generation requests — wait a moment and try again.",
+        );
+      } else {
+        setGenerateError("Couldn't start code generation, try again.");
+      }
+    } finally {
+      setGenerateRequesting(false);
+    }
+  }, [issue, repositoryId, issueId, loadIssue]);
+
   // Protected route: bounce signed-out visitors back to the landing page.
   useEffect(() => {
     if (!userLoading && !user) {
@@ -243,19 +458,26 @@ export default function IssueDetailPage() {
   }, [userLoading, user, loadIssue]);
 
   const isPending = issue ? isPendingPlanningStatus(issue.planning_status) : false;
+  const isGenerationPending = issue?.code_change
+    ? isPendingGenerationStatus(issue.code_change.generation_status)
+    : false;
 
-  // Poll while the issue is queued/planning so it resolves to planned/failed
-  // without a manual refresh, and stop as soon as it does. Same pattern as
+  // Poll while the issue is queued/planning, or its code_change is
+  // queued/generating, so either one resolves without a manual refresh --
+  // stopping once neither is pending any more. One shared interval (rather
+  // than a second one scoped to code_change) since both conditions just
+  // mean "re-fetch this same issue"; `loadIssue` itself already guards
+  // against out-of-order responses via `issueRequestId`. Same pattern as
   // the list page's poll, scoped to this one issue instead of a list.
   useEffect(() => {
-    if (!isPending) {
+    if (!isPending && !isGenerationPending) {
       return;
     }
     const intervalId = setInterval(() => {
       loadIssue();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(intervalId);
-  }, [isPending, loadIssue]);
+  }, [isPending, isGenerationPending, loadIssue]);
 
   if (userLoading || !user) {
     return (
@@ -365,6 +587,36 @@ export default function IssueDetailPage() {
                 No plan is available for this issue.
               </p>
             )}
+
+            {issue.planning_status === "planned" ? (
+              <div className="flex flex-col gap-4 border-t border-black/[.08] pt-6 dark:border-white/[.145]">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <SectionHeading>Code generation</SectionHeading>
+                  <button
+                    type="button"
+                    onClick={handleGenerateCode}
+                    disabled={generateRequesting || isGenerationPending}
+                    className="shrink-0 rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-950 dark:hover:bg-zinc-200"
+                  >
+                    {generateButtonLabel(issue.code_change, generateRequesting)}
+                  </button>
+                </div>
+
+                {generateError ? (
+                  <p className="text-sm text-red-600 dark:text-red-400">
+                    {generateError}
+                  </p>
+                ) : null}
+
+                {issue.code_change ? (
+                  <CodeChangeView codeChange={issue.code_change} />
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                    No code has been generated for this issue yet.
+                  </p>
+                )}
+              </div>
+            ) : null}
           </>
         ) : null}
       </main>

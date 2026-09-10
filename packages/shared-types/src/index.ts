@@ -78,6 +78,18 @@ export interface Plan {
   created_at: string;
 }
 
+// generation_status is "queued" | "generating" | "generated" | "failed" on
+// the backend (app/models/code_change.py) -- left as `string` for the same
+// reason as SearchResult.chunk_type above.
+export interface CodeChange {
+  id: string;
+  generation_status: string;
+  generation_error: string | null;
+  summary: string | null;
+  diff: string | null;
+  created_at: string;
+}
+
 // planning_status is "queued" | "planning" | "planned" | "failed" on the
 // backend (app/models/issue.py) -- left as `string` for the same reason as
 // SearchResult.chunk_type above.
@@ -89,4 +101,5 @@ export interface Issue {
   planning_error: string | null;
   created_at: string;
   plan: Plan | null;
+  code_change: CodeChange | null;
 }

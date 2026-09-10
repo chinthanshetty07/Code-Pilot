@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models import Base
 
 if TYPE_CHECKING:
+    from app.models.code_change import CodeChange
     from app.models.plan import Plan
     from app.models.repository import Repository
     from app.models.user import User
@@ -29,5 +30,8 @@ class Issue(Base):
     repository: Mapped["Repository"] = relationship()
     created_by: Mapped["User"] = relationship()
     plan: Mapped["Plan | None"] = relationship(
+        back_populates="issue", uselist=False, cascade="all, delete-orphan"
+    )
+    code_change: Mapped["CodeChange | None"] = relationship(
         back_populates="issue", uselist=False, cascade="all, delete-orphan"
     )

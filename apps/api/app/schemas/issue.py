@@ -20,6 +20,17 @@ class PlanOut(BaseModel):
     created_at: datetime
 
 
+class CodeChangeOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    generation_status: str
+    generation_error: str | None
+    summary: str | None
+    diff: str | None
+    created_at: datetime
+
+
 class IssueOut(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -30,3 +41,4 @@ class IssueOut(BaseModel):
     planning_error: str | None
     created_at: datetime
     plan: PlanOut | None
+    code_change: CodeChangeOut | None

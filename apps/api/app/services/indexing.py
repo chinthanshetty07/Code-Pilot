@@ -3,17 +3,16 @@ import logging
 import tarfile
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crypto import decrypt_token
 from app.github.client import GitHubClient
 from app.models.code_chunk import CodeChunk
-from app.models.github_account import GitHubAccount
 from app.models.repository import Repository
 from app.rag.chunking import chunk_file, detect_language
 from app.rag.embeddings import get_embedding_provider
 from app.rag.ignore_patterns import MAX_FILE_SIZE_BYTES, should_ignore_path
+from app.services.github_accounts import get_access_token
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +55,6 @@ def _extract_text_files(tarball: bytes) -> dict[str, str]:
     return files
 
 
-async def _get_access_token(db: AsyncSession, owner_id) -> str:
-    result = await db.execute(select(GitHubAccount).where(GitHubAccount.user_id == owner_id))
-    account = result.scalar_one_or_none()
-    if account is None:
-        raise ValueError("No GitHub account linked for this repository's owner")
-    return decrypt_token(account.access_token_encrypted)
-
-
 async def index_repository(db: AsyncSession, repository: Repository) -> None:
     """Download, chunk, embed, and store a repository's code. Updates
     `repository`'s indexing_status/file_count/chunk_count/indexed_at in
@@ -75,7 +66,7 @@ async def index_repository(db: AsyncSession, repository: Repository) -> None:
     await db.commit()
 
     try:
-        access_token = await _get_access_token(db, repository.owner_id)
+        access_token = await get_access_token(db, repository.owner_id)
 
         client = GitHubClient(access_token)
         try:

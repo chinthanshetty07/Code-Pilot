@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     # free-tier quota: 5 generate_content requests/minute for
     # gemini-3.6-flash, easy to exhaust across a multi-turn loop).
     planner_llm_provider: str = "groq"
+    # Same provider, same reasoning, for the Coder agent (Milestone 6) --
+    # revisit if its more tool-heavy loop (read/create/edit_file alongside
+    # search_code) turns out less reliable than the Planner's; the same
+    # forced-finish/retry pattern and the tool_choice fix already apply to
+    # both, since they live in the shared GroqLLMProvider.
+    coder_llm_provider: str = "groq"
 
     embedding_provider: str = "gemini"
     embedding_api_key: str = ""

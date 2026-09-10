@@ -100,3 +100,9 @@ def test_list_issues_requires_authentication(client: TestClient) -> None:
     response = client.get("/api/repositories/does-not-matter/issues")
 
     assert response.status_code == 401
+
+
+def test_create_code_change_requires_authentication(client: TestClient) -> None:
+    response = client.post("/api/repositories/does-not-matter/issues/does-not-matter/code-changes")
+
+    assert response.status_code == 401
