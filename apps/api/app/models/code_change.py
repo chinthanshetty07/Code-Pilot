@@ -9,6 +9,7 @@ from app.models import Base
 
 if TYPE_CHECKING:
     from app.models.issue import Issue
+    from app.models.review import Review
     from app.models.test_run import TestRun
 
 
@@ -33,5 +34,8 @@ class CodeChange(Base):
 
     issue: Mapped["Issue"] = relationship(back_populates="code_change")
     test_run: Mapped["TestRun | None"] = relationship(
+        back_populates="code_change", uselist=False, cascade="all, delete-orphan"
+    )
+    review: Mapped["Review | None"] = relationship(
         back_populates="code_change", uselist=False, cascade="all, delete-orphan"
     )

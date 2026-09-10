@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # forced-finish/retry pattern and the tool_choice fix already apply to
     # both, since they live in the shared GroqLLMProvider.
     coder_llm_provider: str = "groq"
+    # Same provider, same reasoning, for the Reviewer agent (Milestone 9) --
+    # its loop is read-only and closer in shape to the Planner's (search_code
+    # + read_file, no editing), so no new reliability work was expected or
+    # needed beyond what already lives in GroqLLMProvider.
+    reviewer_llm_provider: str = "groq"
 
     embedding_provider: str = "gemini"
     embedding_api_key: str = ""

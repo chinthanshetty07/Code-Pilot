@@ -5,6 +5,7 @@ from app.core.config import get_settings
 from app.workers.tasks import (
     create_code_change_task,
     create_plan_task,
+    create_review_task,
     create_test_run_task,
     index_repository_task,
 )
@@ -30,6 +31,10 @@ class WorkerSettings:
         # app/api/issues.py's enqueue_job(...) call needs to name -- confirmed
         # against the installed arq version's actual source, not assumed.
         func(create_test_run_task, timeout=1800),
+        # No timeout override needed: the Reviewer's loop is read-only and
+        # bounded at MAX_TURNS=8 (see app/agents/reviewer.py), nowhere near
+        # long enough to need more than the default job_timeout below.
+        create_review_task,
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     job_timeout = 600

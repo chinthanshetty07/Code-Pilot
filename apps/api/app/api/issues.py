@@ -10,18 +10,21 @@ from app.core.sessions import get_current_user
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
 from app.models.repository import Repository
+from app.models.review import Review
 from app.models.test_run import TestRun
 from app.models.user import User
 from app.schemas.issue import IssueCreateIn, IssueOut
 
 router = APIRouter(tags=["issues"])
 
-# Full eager-load chain for an Issue's nested plan/code_change/test_run --
-# used everywhere an Issue is queried, since IssueOut always serializes all
-# three and none of them support an async lazy load outside an awaited call.
+# Full eager-load chain for an Issue's nested plan/code_change/test_run/
+# review -- used everywhere an Issue is queried, since IssueOut always
+# serializes all four and none of them support an async lazy load outside
+# an awaited call.
 _ISSUE_LOAD_OPTIONS = (
     selectinload(Issue.plan),
     selectinload(Issue.code_change).selectinload(CodeChange.test_run),
+    selectinload(Issue.code_change).selectinload(CodeChange.review),
 )
 
 
@@ -157,6 +160,14 @@ async def create_code_change(
             detail="A test run is still in progress for the current code -- wait for it to "
             "finish before regenerating",
         )
+    existing_review = issue.code_change.review if issue.code_change is not None else None
+    if existing_review is not None and existing_review.status in ("queued", "reviewing"):
+        # Same race as the test_run check above, now for the Reviewer's job.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A review is still in progress for the current code -- wait for it to "
+            "finish before regenerating",
+        )
 
     if issue.code_change is None:
         code_change = CodeChange(issue_id=issue.id, generation_status="queued")
@@ -164,16 +175,17 @@ async def create_code_change(
     else:
         # Regenerating replaces the previous attempt rather than keeping a
         # history of them -- matches this milestone's scope (see CodeChange).
-        # Any test_run for the old diff is discarded too (cascade, via
-        # setting the relationship to None) -- a stale test result for code
-        # that no longer exists would be actively misleading, not just
-        # unhelpful.
+        # Any test_run/review for the old diff is discarded too (cascade,
+        # via setting the relationship to None) -- a stale test result or
+        # review for code that no longer exists would be actively
+        # misleading, not just unhelpful.
         code_change = issue.code_change
         code_change.generation_status = "queued"
         code_change.generation_error = None
         code_change.summary = None
         code_change.diff = None
         code_change.test_run = None
+        code_change.review = None
     await db.commit()
     await db.refresh(issue, attribute_names=["plan", "code_change"])
 
@@ -228,5 +240,56 @@ async def create_test_run(
 
     pool = await get_arq_pool()
     await pool.enqueue_job("create_test_run_task", str(test_run.id))
+
+    return issue
+
+
+@router.post(
+    "/api/repositories/{repository_id}/issues/{issue_id}/reviews",
+    response_model=IssueOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_review(
+    repository_id: str,
+    issue_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Issue:
+    await rate_limit(request, key="create_review", limit=10, window_seconds=60)
+
+    issue = await _get_owned_issue(db, repository_id, issue_id, user)
+
+    code_change = issue.code_change
+    test_run = code_change.test_run if code_change is not None else None
+    if code_change is None or test_run is None or test_run.status != "passed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This issue doesn't have passing tests to review yet",
+        )
+    existing = code_change.review
+    if existing is not None and existing.status in ("queued", "reviewing"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="A review is already in progress"
+        )
+
+    if existing is None:
+        review = Review(code_change_id=code_change.id, status="queued")
+        db.add(review)
+    else:
+        # Re-requesting replaces the previous verdict rather than keeping a
+        # history of attempts -- same reasoning as CodeChange regeneration
+        # and TestRun re-running.
+        review = existing
+        review.status = "queued"
+        review.error = None
+        review.summary = None
+        review.comments = None
+    await db.commit()
+    await db.refresh(issue, attribute_names=["plan", "code_change"])
+    await db.refresh(issue.code_change, attribute_names=["review"])
+
+    pool = await get_arq_pool()
+    await pool.enqueue_job("create_review_task", str(review.id))
 
     return issue

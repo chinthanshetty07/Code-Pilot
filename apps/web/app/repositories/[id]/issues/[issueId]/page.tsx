@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import type { CodeChange, Issue, Plan, TestRun } from "@codepilot/shared-types";
+import type { CodeChange, Issue, Plan, Review, TestRun } from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
@@ -111,6 +111,39 @@ const TEST_RUN_STATUS_LABEL: Record<string, string> = {
   passed: "Passed",
   failed: "Failed",
   error: "Error",
+};
+
+// Statuses that mean "the Reviewer agent is on it" -- same idea as
+// `PENDING_TEST_RUN_STATUSES` above, scoped to `review.status`.
+const PENDING_REVIEW_STATUSES = new Set(["queued", "reviewing"]);
+
+function isPendingReviewStatus(status: string): boolean {
+  return PENDING_REVIEW_STATUSES.has(status);
+}
+
+// Dot color + label per `review.status`. Same convention as
+// `TEST_RUN_STATUS_DOT_CLASS`/`TEST_RUN_STATUS_LABEL` above, with its own
+// three-way terminal split: "approved" is the usual emerald success,
+// "failed" is the usual red (the review *process* broke -- an LLM/provider
+// error, not a verdict), and "changes_requested" deliberately isn't amber
+// (already this page's "in progress" color, see TEST_RUN_STATUS_DOT_CLASS's
+// comment) or red (it's not a failure, it's the normal, expected outcome of
+// a real review finding something worth fixing) -- sky reads as
+// "constructive, look at this" without either connotation.
+const REVIEW_STATUS_DOT_CLASS: Record<string, string> = {
+  queued: "bg-amber-400",
+  reviewing: "bg-amber-400 animate-pulse",
+  approved: "bg-emerald-500",
+  changes_requested: "bg-sky-500",
+  failed: "bg-red-500",
+};
+
+const REVIEW_STATUS_LABEL: Record<string, string> = {
+  queued: "Queued…",
+  reviewing: "Reviewing…",
+  approved: "Approved",
+  changes_requested: "Changes requested",
+  failed: "Failed",
 };
 
 // Small relative-time formatter built on the native `Intl` API. Copied
@@ -294,6 +327,32 @@ function testRunButtonLabel(
       return "Run tests again";
     default:
       return "Run tests";
+  }
+}
+
+// Button label for the request/re-request review action. Same convention
+// as `testRunButtonLabel` above, with all three terminal statuses
+// (approved/changes_requested/failed) treated the same way, since
+// "re-request" is the right label regardless of which terminal state the
+// previous review landed in.
+function reviewButtonLabel(review: Review | null, isRequesting: boolean): string {
+  if (isRequesting) {
+    return "Starting…";
+  }
+  if (!review) {
+    return "Request review";
+  }
+  switch (review.status) {
+    case "queued":
+      return "Queued…";
+    case "reviewing":
+      return "Reviewing…";
+    case "approved":
+    case "changes_requested":
+    case "failed":
+      return "Request review again";
+    default:
+      return "Request review";
   }
 }
 
@@ -537,6 +596,105 @@ function TestRunView({ testRun }: { testRun: TestRun }) {
   );
 }
 
+// One review finding -- mirrors PlanView's `relevant_files` list item
+// styling (bordered box, mono file path, description below), plus a
+// severity badge so a "Blocking" comment reads differently from a
+// "Suggestion" at a glance without needing its own color-coded box.
+function ReviewCommentItem({ comment }: { comment: NonNullable<Review["comments"]>[number] }) {
+  const isBlocking = comment.severity === "blocking";
+  return (
+    <li className="rounded-lg border border-black/[.08] px-4 py-3 dark:border-white/[.145]">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="break-all font-mono text-sm font-medium text-zinc-950 dark:text-zinc-50">
+          {comment.file_path}
+        </span>
+        <span
+          className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${
+            isBlocking
+              ? "bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-400"
+              : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+          }`}
+        >
+          {isBlocking ? "Blocking" : "Suggestion"}
+        </span>
+      </div>
+      <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{comment.comment}</p>
+    </li>
+  );
+}
+
+// Mirrors `TestRunView` above: status row first, then a status-dependent
+// content region -- three-way terminal split (approved/changes_requested/
+// failed) per the distinction called out on `REVIEW_STATUS_DOT_CLASS`.
+// Comments render for both approved and changes_requested (a clean
+// approval usually has none, but a suggestion doesn't require requesting
+// changes) -- only "failed" (the process itself broke) never has any.
+function ReviewView({ review }: { review: Review }) {
+  const isPending = isPendingReviewStatus(review.status);
+  const isTerminalVerdict = review.status === "approved" || review.status === "changes_requested";
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          aria-hidden
+          className={`h-2 w-2 shrink-0 rounded-full ${
+            REVIEW_STATUS_DOT_CLASS[review.status] ?? ""
+          }`}
+        />
+        <span className="text-sm text-zinc-600 dark:text-zinc-400">
+          {REVIEW_STATUS_LABEL[review.status] ?? review.status}
+          {" · "}
+          <span title={formatAbsoluteTime(review.created_at)} suppressHydrationWarning>
+            {formatRelativeTime(review.created_at)}
+          </span>
+        </span>
+      </div>
+
+      {review.status === "failed" ? (
+        <div className="flex flex-col gap-2">
+          <SectionHeading>Review failed</SectionHeading>
+          <p className="whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-400">
+            {review.error ?? "Something went wrong while reviewing this change."}
+          </p>
+        </div>
+      ) : isPending ? (
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400"
+        >
+          <span
+            aria-hidden
+            className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-400"
+          />
+          <span>
+            {review.status === "queued" ? "Queued for review…" : "Reviewing…"} This usually
+            takes 10–45 seconds.
+          </span>
+        </div>
+      ) : isTerminalVerdict ? (
+        <div className="flex flex-col gap-3">
+          <p
+            className={`rounded-lg border px-4 py-3 text-sm ${
+              review.status === "approved"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-400"
+                : "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-400"
+            }`}
+          >
+            {review.summary}
+          </p>
+          {review.comments && review.comments.length > 0 ? (
+            <ul className="flex flex-col gap-2">
+              {review.comments.map((comment, index) => (
+                <ReviewCommentItem key={index} comment={comment} />
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function IssueDetailPage() {
   const { id: repositoryId, issueId } = useParams<{
     id: string;
@@ -685,6 +843,39 @@ export default function IssueDetailPage() {
     }
   }, [repositoryId, issueId, loadIssue]);
 
+  // --- Code review (Reviewer agent) ---
+  const [reviewRequesting, setReviewRequesting] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+
+  const handleRequestReview = useCallback(async () => {
+    // No confirm() gate, same reasoning as handleRunTests: re-requesting a
+    // review doesn't discard anything the user authored, it just re-reviews
+    // the same, unchanged diff and replaces a derived verdict.
+    setReviewRequesting(true);
+    setReviewError(null);
+    try {
+      const updated = await apiFetch<Issue>(
+        `/api/repositories/${repositoryId}/issues/${issueId}/reviews`,
+        { method: "POST" },
+      );
+      setIssue(updated);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // Same reasoning as the other handlers' 409 handling: resync
+        // instead of showing a stale error.
+        await loadIssue();
+      } else if (error instanceof ApiError && error.status === 429) {
+        setReviewError(
+          "Too many review requests — wait a moment and try again.",
+        );
+      } else {
+        setReviewError("Couldn't request a review, try again.");
+      }
+    } finally {
+      setReviewRequesting(false);
+    }
+  }, [repositoryId, issueId, loadIssue]);
+
   // Protected route: bounce signed-out visitors back to the landing page.
   useEffect(() => {
     if (!userLoading && !user) {
@@ -710,24 +901,28 @@ export default function IssueDetailPage() {
   const isTestRunPending = issue?.code_change?.test_run
     ? isPendingTestRunStatus(issue.code_change.test_run.status)
     : false;
+  const isReviewPending = issue?.code_change?.review
+    ? isPendingReviewStatus(issue.code_change.review.status)
+    : false;
 
   // Poll while the issue is queued/planning, its code_change is
-  // queued/generating, or its test_run is queued/running, so any of the
-  // three resolves without a manual refresh -- stopping once none is
-  // pending any more. One shared interval (rather than a third one scoped
-  // to test_run) since all three conditions just mean "re-fetch this same
-  // issue"; `loadIssue` itself already guards against out-of-order
-  // responses via `issueRequestId`. Same pattern as the list page's poll,
-  // scoped to this one issue instead of a list.
+  // queued/generating, its test_run is queued/running/fixing, or its
+  // review is queued/reviewing, so any of the four resolves without a
+  // manual refresh -- stopping once none is pending any more. One shared
+  // interval (rather than a fourth one scoped to review) since all four
+  // conditions just mean "re-fetch this same issue"; `loadIssue` itself
+  // already guards against out-of-order responses via `issueRequestId`.
+  // Same pattern as the list page's poll, scoped to this one issue instead
+  // of a list.
   useEffect(() => {
-    if (!isPending && !isGenerationPending && !isTestRunPending) {
+    if (!isPending && !isGenerationPending && !isTestRunPending && !isReviewPending) {
       return;
     }
     const intervalId = setInterval(() => {
       loadIssue();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(intervalId);
-  }, [isPending, isGenerationPending, isTestRunPending, loadIssue]);
+  }, [isPending, isGenerationPending, isTestRunPending, isReviewPending, loadIssue]);
 
   if (userLoading || !user) {
     return (
@@ -893,6 +1088,36 @@ export default function IssueDetailPage() {
                 ) : (
                   <p className="text-sm text-zinc-500 dark:text-zinc-400">
                     No tests have been run for this issue yet.
+                  </p>
+                )}
+              </div>
+            ) : null}
+
+            {issue.code_change?.test_run?.status === "passed" ? (
+              <div className="flex flex-col gap-4 border-t border-black/[.08] pt-6 dark:border-white/[.145]">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <SectionHeading>Code review</SectionHeading>
+                  <button
+                    type="button"
+                    onClick={handleRequestReview}
+                    disabled={reviewRequesting || isReviewPending}
+                    className="shrink-0 rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-950 dark:hover:bg-zinc-200"
+                  >
+                    {reviewButtonLabel(issue.code_change.review, reviewRequesting)}
+                  </button>
+                </div>
+
+                {reviewError ? (
+                  <p className="text-sm text-red-600 dark:text-red-400">
+                    {reviewError}
+                  </p>
+                ) : null}
+
+                {issue.code_change.review ? (
+                  <ReviewView review={issue.code_change.review} />
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                    No review has been requested for this issue yet.
                   </p>
                 )}
               </div>

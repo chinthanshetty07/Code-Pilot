@@ -3,7 +3,12 @@ import logging
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.tools import SEARCH_CODE_TOOL, SEARCH_RESULT_LIMIT, format_search_results
+from app.agents.tools import (
+    READ_FILE_TOOL,
+    SEARCH_CODE_TOOL,
+    SEARCH_RESULT_LIMIT,
+    format_search_results,
+)
 from app.core.config import get_settings
 from app.llm.provider import LLMProvider, Message, ToolCall, ToolSpec, get_llm_provider
 from app.models.code_change import CodeChange
@@ -20,22 +25,6 @@ MAX_TURNS = 15
 # Same fallback as the Planner (see app/agents/planner.py) for the same
 # reason -- a model fixated on one tool past the point of usefulness.
 FORCE_FINISH_ATTEMPTS = 3
-
-READ_FILE_TOOL = ToolSpec(
-    name="read_file",
-    description=(
-        "Read a file's current, real content from the repository, by path relative to the "
-        "repository root. Always read a file before editing it if you haven't already seen "
-        "its exact current content in this conversation -- edit_file requires an exact match."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "path": {"type": "string", "description": "File path relative to the repository root"}
-        },
-        "required": ["path"],
-    },
-)
 
 CREATE_FILE_TOOL = ToolSpec(
     name="create_file",

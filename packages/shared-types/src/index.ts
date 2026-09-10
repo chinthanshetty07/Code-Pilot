@@ -98,6 +98,32 @@ export interface TestRun {
   created_at: string;
 }
 
+// severity is "blocking" | "suggestion" on the backend
+// (app/agents/reviewer.py) -- left as `string` for the same reason as
+// SearchResult.chunk_type above.
+export interface ReviewComment {
+  file_path: string;
+  severity: string;
+  comment: string;
+}
+
+// status is "queued" | "reviewing" | "approved" | "changes_requested" |
+// "failed" on the backend (app/models/review.py) -- left as `string` for
+// the same reason as SearchResult.chunk_type above. approved/
+// changes_requested are the two real verdicts; "failed" means the review
+// *process* broke (LLM/provider error), not a judgment about the code --
+// same failed/error-style distinction TestRun makes for its own status.
+// comments is null until a verdict is actually reached, and can still be
+// an empty array after that (a clean approval with nothing to flag).
+export interface Review {
+  id: string;
+  status: string;
+  error: string | null;
+  summary: string | null;
+  comments: ReviewComment[] | null;
+  created_at: string;
+}
+
 // generation_status is "queued" | "generating" | "generated" | "failed" on
 // the backend (app/models/code_change.py) -- left as `string` for the same
 // reason as SearchResult.chunk_type above.
@@ -109,6 +135,7 @@ export interface CodeChange {
   diff: string | null;
   created_at: string;
   test_run: TestRun | null;
+  review: Review | null;
 }
 
 // planning_status is "queued" | "planning" | "planned" | "failed" on the

@@ -32,6 +32,25 @@ class TestRunOut(BaseModel):
     created_at: datetime
 
 
+class ReviewCommentOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    file_path: str
+    severity: str
+    comment: str
+
+
+class ReviewOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    status: str
+    error: str | None
+    summary: str | None
+    comments: list[ReviewCommentOut] | None
+    created_at: datetime
+
+
 class CodeChangeOut(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -42,6 +61,7 @@ class CodeChangeOut(BaseModel):
     diff: str | None
     created_at: datetime
     test_run: TestRunOut | None
+    review: ReviewOut | None
 
 
 class IssueOut(BaseModel):

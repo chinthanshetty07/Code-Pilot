@@ -1,6 +1,11 @@
-"""Tool definitions shared across agents. search_code is the only one both
-the Planner and Coder agents use identically; each agent's own file keeps
-whatever tools are specific to it (submit_plan, read_file/edit_file/...)."""
+"""Tool definitions shared across agents -- search_code (Planner, Coder,
+Reviewer) and read_file (Coder, Reviewer) are identical everywhere they're
+used, so they live here once. Each agent's own file keeps whatever tools
+are specific to it (submit_plan, create_file/edit_file/get_git_diff,
+submit_review, ...); a shared tool's description stays agent-neutral --
+guidance specific to one agent's use of it (e.g. Coder's "read a file
+before editing it") belongs in that agent's own system prompt, not here.
+"""
 
 import json
 
@@ -20,6 +25,21 @@ SEARCH_CODE_TOOL = ToolSpec(
         "type": "object",
         "properties": {"query": {"type": "string", "description": "What to search for"}},
         "required": ["query"],
+    },
+)
+
+READ_FILE_TOOL = ToolSpec(
+    name="read_file",
+    description=(
+        "Read a file's current, real content from the repository, by path relative to the "
+        "repository root."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "File path relative to the repository root"}
+        },
+        "required": ["path"],
     },
 )
 
