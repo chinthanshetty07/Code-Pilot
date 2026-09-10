@@ -65,27 +65,40 @@ const GENERATION_STATUS_LABEL: Record<string, string> = {
 };
 
 // Statuses that mean "the sandbox is on it" -- same idea as
-// `PENDING_GENERATION_STATUSES` above, scoped to `test_run.status`.
-const PENDING_TEST_RUN_STATUSES = new Set(["queued", "running"]);
+// `PENDING_GENERATION_STATUSES` above, scoped to `test_run.status`. "fixing"
+// counts as pending too: it's the Milestone 8 fix loop actually working
+// (the Coder agent generating a fix, in between two "running"s), not a
+// resting state.
+const PENDING_TEST_RUN_STATUSES = new Set(["queued", "running", "fixing"]);
 
 function isPendingTestRunStatus(status: string): boolean {
   return PENDING_TEST_RUN_STATUSES.has(status);
 }
 
+// Must match app/services/test_runner.py's MAX_FIX_ATTEMPTS -- there's no
+// API-level source of truth for this one number, so it's just kept in sync
+// by convention, the same loose coupling this page already has with the
+// backend's status string unions (see the comments on TestRun in
+// packages/shared-types/src/index.ts).
+const MAX_FIX_ATTEMPTS = 3;
+
 // Dot color + label per `test_run.status`. Same convention as
 // `GENERATION_STATUS_DOT_CLASS`/`GENERATION_STATUS_LABEL` above, but with a
 // three-way terminal split instead of two: "passed" is the usual emerald
 // success, "failed" is the usual red failure (tests ran, some assertions
-// didn't pass -- actionable, e.g. by a later fix-loop), and "error" gets its
-// own amber/orange tone rather than reusing either -- no verdict was reached
-// at all (no test command detected, a sandbox/infra problem, or a timeout),
-// which is a materially different situation from "failed" and shouldn't
-// read as the same red box. Orange rather than plain amber specifically so
-// it doesn't get confused with this same page's amber "queued/in progress"
-// dots when skimming.
+// didn't pass -- actionable, e.g. by the fix loop below), and "error" gets
+// its own amber/orange tone rather than reusing either -- no verdict was
+// reached at all (no test command detected, a sandbox/infra problem, or a
+// timeout), which is a materially different situation from "failed" and
+// shouldn't read as the same red box. Orange rather than plain amber
+// specifically so it doesn't get confused with this same page's amber
+// "queued/in progress" dots when skimming. "fixing" reuses the same pulsing
+// amber as "running" -- it's the same kind of "in progress" as far as the
+// dot is concerned, just with a more specific label.
 const TEST_RUN_STATUS_DOT_CLASS: Record<string, string> = {
   queued: "bg-amber-400",
   running: "bg-amber-400 animate-pulse",
+  fixing: "bg-amber-400 animate-pulse",
   passed: "bg-emerald-500",
   failed: "bg-red-500",
   error: "bg-orange-500",
@@ -94,6 +107,7 @@ const TEST_RUN_STATUS_DOT_CLASS: Record<string, string> = {
 const TEST_RUN_STATUS_LABEL: Record<string, string> = {
   queued: "Queued…",
   running: "Running…",
+  fixing: "Fixing…",
   passed: "Passed",
   failed: "Failed",
   error: "Error",
@@ -272,6 +286,8 @@ function testRunButtonLabel(
       return "Queued…";
     case "running":
       return "Running…";
+    case "fixing":
+      return "Fixing…";
     case "passed":
     case "failed":
     case "error":
@@ -463,13 +479,22 @@ function TestRunView({ testRun }: { testRun: TestRun }) {
           <span>
             {testRun.status === "queued"
               ? "Queued for test run…"
-              : "Running tests…"}{" "}
+              : testRun.status === "fixing"
+                ? `The Coder agent is attempting a fix (attempt ${testRun.fix_attempts} of ${MAX_FIX_ATTEMPTS})…`
+                : "Running tests…"}{" "}
             This usually takes 30 seconds to several minutes.
           </span>
         </div>
       ) : testRun.status === "failed" ? (
         <div className="flex flex-col gap-2">
           <SectionHeading>Tests failed</SectionHeading>
+          {testRun.fix_attempts > 0 ? (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              The Coder agent tried to fix this {testRun.fix_attempts}{" "}
+              {testRun.fix_attempts === 1 ? "time" : "times"} and it still
+              failed.
+            </p>
+          ) : null}
           {typeof testRun.exit_code === "number" ? (
             <p className="text-sm text-red-700 dark:text-red-400">
               Exit code {testRun.exit_code}
@@ -491,7 +516,12 @@ function TestRunView({ testRun }: { testRun: TestRun }) {
       ) : testRun.status === "passed" ? (
         <div className="flex flex-col gap-2">
           <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-400">
-            All tests passed.
+            All tests passed
+            {testRun.fix_attempts > 0
+              ? ` (after ${testRun.fix_attempts} fix ${
+                  testRun.fix_attempts === 1 ? "attempt" : "attempts"
+                } by the Coder agent).`
+              : "."}
           </p>
           {testRun.command ? (
             <p className="break-all font-mono text-xs text-zinc-600 dark:text-zinc-400">

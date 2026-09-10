@@ -28,6 +28,7 @@ class TestRunOut(BaseModel):
     command: str | None
     output: str | None
     exit_code: int | None
+    fix_attempts: int
     created_at: datetime
 
 

@@ -8,13 +8,14 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.agents import coder as coder_module
-from app.agents.coder import FORCE_FINISH_ATTEMPTS, MAX_TURNS, create_code_change
+from app.agents.coder import FORCE_FINISH_ATTEMPTS, MAX_TURNS, create_code_change, fix_code_change
 from app.core.db import async_session_factory
 from app.llm.provider import LLMResponse, ToolCall
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
 from app.models.plan import Plan
 from app.models.repository import Repository
+from app.models.test_run import TestRun
 from app.models.user import User
 from app.services.workspace import Workspace
 
@@ -278,3 +279,71 @@ async def test_create_code_change_fails_after_exhausting_all_attempts(
     reloaded = await _reload(code_change)
     assert reloaded.generation_status == "failed"
     assert "did not finish" in (reloaded.generation_error or "")
+
+
+async def test_fix_code_change_edits_and_returns_summary(
+    monkeypatch: pytest.MonkeyPatch, code_change: CodeChange
+) -> None:
+    """fix_code_change (Milestone 8) shares create_code_change's tool loop
+    but is seeded with a previous summary + failing test output instead of
+    a fresh issue+plan -- and, unlike create_code_change, doesn't persist
+    anything itself (no db.commit, no touching code_change.diff/summary):
+    that's app/services/test_runner.py's job, since it's the one that
+    knows whether this is the first attempt or attempt N."""
+    edit_call = ToolCall(
+        id="call_edit",
+        name="edit_file",
+        arguments={
+            "path": "src/app.py",
+            "old_string": "hello {name}",
+            "new_string": "hello {name.capitalize()}",
+        },
+    )
+    fake_provider = AsyncMock()
+    fake_provider.complete = AsyncMock(
+        side_effect=[
+            LLMResponse(content=None, tool_calls=[edit_call]),
+            LLMResponse(
+                content=None,
+                tool_calls=[_finish_call(summary="Fixed the capitalization bug.")],
+            ),
+        ]
+    )
+    monkeypatch.setattr(coder_module, "get_llm_provider", lambda _name: fake_provider)
+
+    workspace = await _make_local_workspace()
+    try:
+        async with async_session_factory() as db:
+            db_code_change = await _load_full(db, code_change.id)
+            test_run = TestRun(
+                code_change_id=db_code_change.id,
+                status="failed",
+                command="pytest",
+                output="AssertionError: expected 'Hello alice' but got 'hello alice'",
+                exit_code=1,
+            )
+            summary = await fix_code_change(
+                db,
+                workspace,
+                db_code_change.issue.repository.id,
+                db_code_change.issue,
+                db_code_change.issue.plan,
+                db_code_change,
+                test_run,
+            )
+
+        assert summary == "Fixed the capitalization bug."
+        diff = await workspace.git_diff()
+        assert "capitalize" in diff
+
+        # Doesn't persist anything itself -- still exactly as loaded.
+        reloaded = await _reload(code_change)
+        assert reloaded.summary is None
+        assert reloaded.diff is None
+    finally:
+        workspace.cleanup()
+
+    first_call_messages = fake_provider.complete.call_args_list[0].args[0]
+    assert any(
+        "expected 'Hello alice'" in (m.content or "") for m in first_call_messages
+    )

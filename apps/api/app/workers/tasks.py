@@ -63,7 +63,16 @@ async def create_test_run_task(ctx: dict, test_run_id: str) -> dict:
             .options(
                 selectinload(TestRun.code_change)
                 .selectinload(CodeChange.issue)
-                .selectinload(Issue.repository)
+                .selectinload(Issue.repository),
+                # Milestone 8's fix loop reads issue.plan too (for context
+                # in a fix attempt's prompt) -- without this, that access
+                # is a lazy load outside an awaited context, which crashes
+                # every real test run with a MissingGreenlet error, not
+                # just ones that reach the fix loop (run_tests reads it
+                # unconditionally, right after loading the issue).
+                selectinload(TestRun.code_change)
+                .selectinload(CodeChange.issue)
+                .selectinload(Issue.plan),
             )
             .where(TestRun.id == uuid.UUID(test_run_id))
         )

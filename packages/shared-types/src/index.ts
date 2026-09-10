@@ -78,19 +78,23 @@ export interface Plan {
   created_at: string;
 }
 
-// status is "queued" | "running" | "passed" | "failed" | "error" on the
-// backend (app/models/test_run.py) -- left as `string` for the same reason
-// as SearchResult.chunk_type above. "failed" means the tests actually ran
-// and some didn't pass (exit_code is set); "error" means no verdict was
-// reached at all (no test command detected, a sandbox/infra failure, or a
-// timeout) -- exit_code is null in that case. Worth showing distinctly:
-// "failed" is actionable in the normal way, "error" usually isn't.
+// status is "queued" | "running" | "fixing" | "passed" | "failed" | "error"
+// on the backend (app/models/test_run.py) -- left as `string` for the same
+// reason as SearchResult.chunk_type above. "failed" means the tests
+// actually ran and some didn't pass (exit_code is set); "error" means no
+// verdict was reached at all (no test command detected, a sandbox/infra
+// failure, or a timeout) -- exit_code is null in that case. "fixing" is the
+// Milestone 8 fix loop actually working (the Coder agent generating a fix,
+// in between two "running"s) -- pending, like queued/running, just with its
+// own label. fix_attempts counts how many fix passes this test_run has gone
+// through so far (capped server-side); 0 means none has run yet.
 export interface TestRun {
   id: string;
   status: string;
   command: string | null;
   output: string | null;
   exit_code: number | null;
+  fix_attempts: number;
   created_at: string;
 }
 

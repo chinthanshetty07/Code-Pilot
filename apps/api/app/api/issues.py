@@ -142,6 +142,21 @@ async def create_code_change(
             status_code=status.HTTP_409_CONFLICT,
             detail="Code generation is already in progress",
         )
+    existing_test_run = issue.code_change.test_run if issue.code_change is not None else None
+    if existing_test_run is not None and existing_test_run.status in (
+        "queued",
+        "running",
+        "fixing",
+    ):
+        # Regenerating discards the code_change's test_run below (cascade),
+        # which would otherwise race a worker job that's still actively
+        # writing to that same row -- most likely now that Milestone 8's fix
+        # loop can keep one test run job alive for several minutes.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A test run is still in progress for the current code -- wait for it to "
+            "finish before regenerating",
+        )
 
     if issue.code_change is None:
         code_change = CodeChange(issue_id=issue.id, generation_status="queued")
@@ -190,7 +205,7 @@ async def create_test_run(
             detail="This issue doesn't have generated code to test yet",
         )
     existing = issue.code_change.test_run
-    if existing is not None and existing.status in ("queued", "running"):
+    if existing is not None and existing.status in ("queued", "running", "fixing"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="A test run is already in progress"
         )
@@ -206,6 +221,7 @@ async def create_test_run(
         test_run.command = None
         test_run.output = None
         test_run.exit_code = None
+        test_run.fix_attempts = 0
     await db.commit()
     await db.refresh(issue, attribute_names=["plan", "code_change"])
     await db.refresh(issue.code_change, attribute_names=["test_run"])

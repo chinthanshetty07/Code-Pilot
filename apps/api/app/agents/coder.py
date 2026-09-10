@@ -5,8 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.tools import SEARCH_CODE_TOOL, SEARCH_RESULT_LIMIT, format_search_results
 from app.core.config import get_settings
-from app.llm.provider import Message, ToolCall, ToolSpec, get_llm_provider
+from app.llm.provider import LLMProvider, Message, ToolCall, ToolSpec, get_llm_provider
 from app.models.code_change import CodeChange
+from app.models.test_run import TestRun
 from app.services.github_accounts import get_access_token
 from app.services.search import search_code
 from app.services.workspace import Workspace, WorkspaceError, create_workspace
@@ -127,6 +128,33 @@ conventions. You have a hard budget of {MAX_TURNS} total tool calls for this who
 
 Call finish exactly once, when your changes are complete."""
 
+# Tail of a failing test's captured output included in a fix attempt's
+# prompt -- pytest/jest failures put the actual assertion/traceback at the
+# END of the output, with potentially thousands of characters of setup or
+# passing-test noise before it, so this takes the last N characters rather
+# than the first. Keeps the prompt focused and cheap without real log
+# parsing.
+FIX_OUTPUT_TAIL_CHARS = 4000
+
+FIX_SYSTEM_PROMPT = f"""You are the Coder agent in CodePilot, an AI software engineering tool.
+
+You previously made a code change for a developer's issue, but the repository's test suite
+failed against it. You're given the original issue, your own summary of what you changed
+before, and the exact command and output of the failing test run. The workspace already
+reflects your previous change -- you're continuing from there, not starting over. Diagnose the
+real cause of the failure from the output before changing anything, then fix it using the tools
+available: search_code for more context, read_file before editing anything you haven't already
+seen the exact current content of, create_file for brand new files, edit_file to change existing
+ones, and get_git_diff to check your progress against the *original* repository state (it
+reflects your earlier change plus whatever you do now, combined).
+
+Ground every change in real file content you've actually read -- never guess at what a file
+currently contains or invent code that isn't there. Match the existing code's own style and
+conventions. You have a hard budget of {MAX_TURNS} total tool calls for this whole task.
+
+Call finish exactly once, when you're done, summarizing the change's current full state (not
+just what you changed in this fix pass -- the summary you give replaces the previous one)."""
+
 
 class _CodeChangeResult(BaseModel):
     summary: str
@@ -146,6 +174,22 @@ def _build_task_description(issue, plan) -> str:
         f"blindly):\n{files}\n\n"
         f"Implementation steps:\n{steps}\n\n"
         f"Tests to add or change:\n{tests}"
+    )
+
+
+def _build_fix_description(issue, plan, code_change: CodeChange, test_run: TestRun) -> str:
+    plan_section = f"Plan summary:\n{plan.summary}\n\n" if plan is not None else ""
+    output = test_run.output or "(no output captured)"
+    if len(output) > FIX_OUTPUT_TAIL_CHARS:
+        output = f"[... earlier output truncated ...]\n{output[-FIX_OUTPUT_TAIL_CHARS:]}"
+    return (
+        f"Issue:\n{issue.description}\n\n"
+        f"{plan_section}"
+        f"Your previous summary of this change:\n{code_change.summary or '(none)'}\n\n"
+        f"You ran the repository's tests and they failed. Diagnose the failure from the "
+        f"output below, then fix it.\n\n"
+        f"Test command:\n{test_run.command}\n\n"
+        f"Captured output:\n{output}"
     )
 
 
@@ -182,14 +226,109 @@ async def _execute_tool(
         return f"Error: {exc}"
 
 
+async def _run_coding_loop(
+    provider: LLMProvider,
+    workspace: Workspace,
+    db: AsyncSession,
+    repository_id,
+    system: str,
+    initial_message: str,
+) -> _CodeChangeResult:
+    """Shared tool loop + forced-finish fallback: search_code/read_file/
+    create_file/edit_file/finish against a real git-backed checkout,
+    capped at MAX_TURNS with the same forced-finish fallback proven for
+    the Planner agent (see app/agents/planner.py for why this needs all
+    three of a narrowed schema, forced tool_choice, and explicit
+    plain-language reinforcement together). Used for both a fresh code
+    generation and a fix attempt -- they differ only in the system prompt
+    and the message that starts the conversation, not in how convergence
+    is reached."""
+    messages: list[Message] = [Message(role="user", content=initial_message)]
+    result: _CodeChangeResult | None = None
+
+    for _turn in range(MAX_TURNS):
+        response = await provider.complete(messages, tools=CODER_TOOLS, system=system)
+
+        if not response.tool_calls:
+            messages.append(Message(role="assistant", content=response.content))
+            messages.append(
+                Message(
+                    role="user",
+                    content="Please continue making the necessary changes, then call finish.",
+                )
+            )
+            continue
+
+        messages.append(
+            Message(role="assistant", content=response.content, tool_calls=response.tool_calls)
+        )
+
+        for call in response.tool_calls:
+            if call.name == "finish":
+                result = _CodeChangeResult.model_validate(call.arguments)
+                messages.append(
+                    Message(role="tool", content="ok", tool_call_id=call.id, name=call.name)
+                )
+            else:
+                tool_result = await _execute_tool(workspace, db, repository_id, call)
+                messages.append(
+                    Message(role="tool", content=tool_result, tool_call_id=call.id, name=call.name)
+                )
+
+        if result is not None:
+            break
+
+    if result is None:
+        # See app/agents/planner.py's identical fallback for why this
+        # exists and why it's shaped this way (schema narrowed to just
+        # finish, not merely discouraged from the others; retried a few
+        # times since even a forced attempt doesn't always land).
+        for _attempt in range(FORCE_FINISH_ATTEMPTS):
+            messages.append(
+                Message(
+                    role="user",
+                    content="You must call finish now, in this turn, summarizing "
+                    "whatever changes you've already made. No other tool is available "
+                    "anymore.",
+                )
+            )
+            response = await provider.complete(
+                messages, tools=[FINISH_TOOL], system=system, force_tool="finish"
+            )
+            if response.tool_calls and response.tool_calls[0].name == "finish":
+                call = response.tool_calls[0]
+                messages.append(
+                    Message(role="assistant", content=response.content, tool_calls=[call])
+                )
+                try:
+                    result = _CodeChangeResult.model_validate(call.arguments)
+                    break
+                except ValidationError:
+                    messages.append(
+                        Message(
+                            role="tool",
+                            content="That didn't match the required shape. Try again.",
+                            tool_call_id=call.id,
+                            name=call.name,
+                        )
+                    )
+            else:
+                messages.append(Message(role="assistant", content=response.content))
+
+    if result is None:
+        raise ValueError(
+            f"Coder did not finish within {MAX_TURNS} turns or "
+            f"{FORCE_FINISH_ATTEMPTS} forced attempts"
+        )
+
+    return result
+
+
 async def create_code_change(db: AsyncSession, code_change: CodeChange) -> None:
-    """Run the Coder agent for one CodeChange: search_code/read_file/
-    create_file/edit_file/finish tool loop against a real git-backed
-    checkout of the repository, capped at MAX_TURNS with the same
-    forced-finish fallback proven for the Planner agent (see
-    app/agents/planner.py). Never raises -- failures are recorded on the
-    code_change itself, so the job always completes and the failure is
-    visible to the user."""
+    """Run the Coder agent for one CodeChange against a fresh, real
+    git-backed checkout of the repository. Never raises -- failures are
+    recorded on the code_change itself, so the job always completes and
+    the failure is visible to the user."""
     code_change.generation_status = "generating"
     code_change.generation_error = None
     await db.commit()
@@ -207,90 +346,14 @@ async def create_code_change(db: AsyncSession, code_change: CodeChange) -> None:
         workspace = await create_workspace(access_token, repository.full_name)
 
         provider = get_llm_provider(get_settings().coder_llm_provider)
-        messages: list[Message] = [
-            Message(role="user", content=_build_task_description(issue, plan))
-        ]
-        result: _CodeChangeResult | None = None
-
-        for _turn in range(MAX_TURNS):
-            response = await provider.complete(messages, tools=CODER_TOOLS, system=SYSTEM_PROMPT)
-
-            if not response.tool_calls:
-                messages.append(Message(role="assistant", content=response.content))
-                messages.append(
-                    Message(
-                        role="user",
-                        content="Please continue making the necessary changes, then call finish.",
-                    )
-                )
-                continue
-
-            messages.append(
-                Message(role="assistant", content=response.content, tool_calls=response.tool_calls)
-            )
-
-            for call in response.tool_calls:
-                if call.name == "finish":
-                    result = _CodeChangeResult.model_validate(call.arguments)
-                    messages.append(
-                        Message(role="tool", content="ok", tool_call_id=call.id, name=call.name)
-                    )
-                else:
-                    tool_result = await _execute_tool(workspace, db, repository.id, call)
-                    messages.append(
-                        Message(
-                            role="tool",
-                            content=tool_result,
-                            tool_call_id=call.id,
-                            name=call.name,
-                        )
-                    )
-
-            if result is not None:
-                break
-
-        if result is None:
-            # See app/agents/planner.py's identical fallback for why this
-            # exists and why it's shaped this way (schema narrowed to just
-            # finish, not merely discouraged from the others; retried a few
-            # times since even a forced attempt doesn't always land).
-            for _attempt in range(FORCE_FINISH_ATTEMPTS):
-                messages.append(
-                    Message(
-                        role="user",
-                        content="You must call finish now, in this turn, summarizing "
-                        "whatever changes you've already made. No other tool is available "
-                        "anymore.",
-                    )
-                )
-                response = await provider.complete(
-                    messages, tools=[FINISH_TOOL], system=SYSTEM_PROMPT, force_tool="finish"
-                )
-                if response.tool_calls and response.tool_calls[0].name == "finish":
-                    call = response.tool_calls[0]
-                    messages.append(
-                        Message(role="assistant", content=response.content, tool_calls=[call])
-                    )
-                    try:
-                        result = _CodeChangeResult.model_validate(call.arguments)
-                        break
-                    except ValidationError:
-                        messages.append(
-                            Message(
-                                role="tool",
-                                content="That didn't match the required shape. Try again.",
-                                tool_call_id=call.id,
-                                name=call.name,
-                            )
-                        )
-                else:
-                    messages.append(Message(role="assistant", content=response.content))
-
-        if result is None:
-            raise ValueError(
-                f"Coder did not finish within {MAX_TURNS} turns or "
-                f"{FORCE_FINISH_ATTEMPTS} forced attempts"
-            )
+        result = await _run_coding_loop(
+            provider,
+            workspace,
+            db,
+            repository.id,
+            SYSTEM_PROMPT,
+            _build_task_description(issue, plan),
+        )
 
         diff = await workspace.git_diff()
         code_change.summary = result.summary
@@ -311,3 +374,33 @@ async def create_code_change(db: AsyncSession, code_change: CodeChange) -> None:
     finally:
         if workspace is not None:
             workspace.cleanup()
+
+
+async def fix_code_change(
+    db: AsyncSession,
+    workspace: Workspace,
+    repository_id,
+    issue,
+    plan,
+    code_change: CodeChange,
+    test_run: TestRun,
+) -> str:
+    """Runs one fix attempt against an already-prepared workspace (the
+    previous diff already applied, a failing test already run there) --
+    shares _run_coding_loop with create_code_change, just seeded with the
+    failure instead of a fresh issue+plan. Returns the new summary; the
+    caller (app/services/test_runner.py) recomputes the diff via
+    workspace.git_diff() once this returns and is responsible for
+    persisting both -- this function doesn't commit anything itself, it's
+    pure agent-loop logic, the same division of responsibility
+    create_code_change has with its own caller."""
+    provider = get_llm_provider(get_settings().coder_llm_provider)
+    result = await _run_coding_loop(
+        provider,
+        workspace,
+        db,
+        repository_id,
+        FIX_SYSTEM_PROMPT,
+        _build_fix_description(issue, plan, code_change, test_run),
+    )
+    return result.summary
