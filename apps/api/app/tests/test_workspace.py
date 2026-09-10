@@ -116,3 +116,48 @@ def test_read_file_truncates_very_large_files(workspace: Workspace) -> None:
 
     assert len(content) < MAX_READ_FILE_CHARS + 1000
     assert "truncated" in content
+
+
+async def test_apply_diff_reproduces_the_edits_in_a_fresh_workspace(
+    workspace: Workspace,
+) -> None:
+    """This is the exact mechanism the test runner (Milestone 7) relies on:
+    a diff captured from one workspace must apply cleanly to a second,
+    independently-created workspace starting from the identical initial
+    state -- since the original workspace is long gone by the time tests
+    run (see Workspace.apply_diff's docstring)."""
+    workspace.edit_file("src/app.py", "hello {name}", "hi there, {name}")
+    workspace.create_file("src/new_module.py", "VALUE = 42\n")
+    diff = await workspace.git_diff()
+
+    fresh_root = Path(tempfile.mkdtemp(prefix="workspace-test-fresh-"))
+    (fresh_root / "src").mkdir()
+    (fresh_root / "src" / "app.py").write_text("def greet(name):\n    return f'hello {name}'\n")
+    (fresh_root / "README.md").write_text("# Demo\n")
+    fresh = Workspace(fresh_root)
+    await fresh._run_git("init", "-q")
+    await fresh._run_git("config", "user.email", "test@localhost")
+    await fresh._run_git("config", "user.name", "Test")
+    await fresh._run_git("add", "-A")
+    await fresh._run_git("commit", "-q", "-m", "Initial state")
+
+    await fresh.apply_diff(diff)
+
+    assert "hi there, {name}" in fresh.read_file("src/app.py")
+    assert fresh.read_file("src/new_module.py") == "VALUE = 42\n"
+    fresh.cleanup()
+
+
+async def test_apply_diff_raises_when_it_does_not_match(workspace: Workspace) -> None:
+    bogus_diff = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "index 0000000..1111111 100644\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def greet(name):\n"
+        "-    return f'this text does not exist in the real file'\n"
+        "+    return f'x'\n"
+    )
+    with pytest.raises(WorkspaceError, match="git apply .* failed"):
+        await workspace.apply_diff(bogus_diff)

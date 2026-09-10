@@ -20,6 +20,17 @@ class PlanOut(BaseModel):
     created_at: datetime
 
 
+class TestRunOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    status: str
+    command: str | None
+    output: str | None
+    exit_code: int | None
+    created_at: datetime
+
+
 class CodeChangeOut(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -29,6 +40,7 @@ class CodeChangeOut(BaseModel):
     summary: str | None
     diff: str | None
     created_at: datetime
+    test_run: TestRunOut | None
 
 
 class IssueOut(BaseModel):

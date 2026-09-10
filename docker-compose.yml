@@ -57,6 +57,15 @@ services:
     volumes:
       - ./apps/api:/app
       - /app/.venv
+      # Sibling-container access for the Milestone 7 sandboxed test runner:
+      # the worker spins up ephemeral, resource-limited containers to run a
+      # generated diff's tests, rather than executing them in-process. Only
+      # `worker` gets this, not `api` -- the API container has no need to
+      # talk to Docker and shouldn't have the ability to. This grants the
+      # worker broad control over the Docker host (the standard, accepted
+      # tradeoff of the docker-socket-mounting pattern) -- reasonable for a
+      # local dev environment; revisit before ever deploying this shared.
+      - /var/run/docker.sock:/var/run/docker.sock
     command: arq app.workers.worker.WorkerSettings
     depends_on:
       postgres:

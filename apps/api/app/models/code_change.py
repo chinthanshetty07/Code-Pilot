@@ -9,6 +9,7 @@ from app.models import Base
 
 if TYPE_CHECKING:
     from app.models.issue import Issue
+    from app.models.test_run import TestRun
 
 
 class CodeChange(Base):
@@ -31,3 +32,6 @@ class CodeChange(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     issue: Mapped["Issue"] = relationship(back_populates="code_change")
+    test_run: Mapped["TestRun | None"] = relationship(
+        back_populates="code_change", uselist=False, cascade="all, delete-orphan"
+    )

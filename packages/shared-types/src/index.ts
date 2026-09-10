@@ -78,6 +78,22 @@ export interface Plan {
   created_at: string;
 }
 
+// status is "queued" | "running" | "passed" | "failed" | "error" on the
+// backend (app/models/test_run.py) -- left as `string` for the same reason
+// as SearchResult.chunk_type above. "failed" means the tests actually ran
+// and some didn't pass (exit_code is set); "error" means no verdict was
+// reached at all (no test command detected, a sandbox/infra failure, or a
+// timeout) -- exit_code is null in that case. Worth showing distinctly:
+// "failed" is actionable in the normal way, "error" usually isn't.
+export interface TestRun {
+  id: string;
+  status: string;
+  command: string | null;
+  output: string | null;
+  exit_code: number | null;
+  created_at: string;
+}
+
 // generation_status is "queued" | "generating" | "generated" | "failed" on
 // the backend (app/models/code_change.py) -- left as `string` for the same
 // reason as SearchResult.chunk_type above.
@@ -88,6 +104,7 @@ export interface CodeChange {
   summary: string | null;
   diff: string | null;
   created_at: string;
+  test_run: TestRun | null;
 }
 
 // planning_status is "queued" | "planning" | "planned" | "failed" on the

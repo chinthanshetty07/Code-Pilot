@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import type { CodeChange, Issue, Plan } from "@codepilot/shared-types";
+import type { CodeChange, Issue, Plan, TestRun } from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
@@ -62,6 +62,41 @@ const GENERATION_STATUS_LABEL: Record<string, string> = {
   generating: "Generating…",
   generated: "Generated",
   failed: "Failed",
+};
+
+// Statuses that mean "the sandbox is on it" -- same idea as
+// `PENDING_GENERATION_STATUSES` above, scoped to `test_run.status`.
+const PENDING_TEST_RUN_STATUSES = new Set(["queued", "running"]);
+
+function isPendingTestRunStatus(status: string): boolean {
+  return PENDING_TEST_RUN_STATUSES.has(status);
+}
+
+// Dot color + label per `test_run.status`. Same convention as
+// `GENERATION_STATUS_DOT_CLASS`/`GENERATION_STATUS_LABEL` above, but with a
+// three-way terminal split instead of two: "passed" is the usual emerald
+// success, "failed" is the usual red failure (tests ran, some assertions
+// didn't pass -- actionable, e.g. by a later fix-loop), and "error" gets its
+// own amber/orange tone rather than reusing either -- no verdict was reached
+// at all (no test command detected, a sandbox/infra problem, or a timeout),
+// which is a materially different situation from "failed" and shouldn't
+// read as the same red box. Orange rather than plain amber specifically so
+// it doesn't get confused with this same page's amber "queued/in progress"
+// dots when skimming.
+const TEST_RUN_STATUS_DOT_CLASS: Record<string, string> = {
+  queued: "bg-amber-400",
+  running: "bg-amber-400 animate-pulse",
+  passed: "bg-emerald-500",
+  failed: "bg-red-500",
+  error: "bg-orange-500",
+};
+
+const TEST_RUN_STATUS_LABEL: Record<string, string> = {
+  queued: "Queued…",
+  running: "Running…",
+  passed: "Passed",
+  failed: "Failed",
+  error: "Error",
 };
 
 // Small relative-time formatter built on the native `Intl` API. Copied
@@ -217,6 +252,35 @@ function generateButtonLabel(
   }
 }
 
+// Button label for the run/re-run test action. Same convention as
+// `generateButtonLabel` above, just scoped to `test_run.status` -- with all
+// three terminal statuses (passed/failed/error) treated the same way here,
+// since "re-run" is the right label regardless of which terminal state the
+// previous attempt landed in.
+function testRunButtonLabel(
+  testRun: TestRun | null,
+  isRequesting: boolean,
+): string {
+  if (isRequesting) {
+    return "Starting…";
+  }
+  if (!testRun) {
+    return "Run tests";
+  }
+  switch (testRun.status) {
+    case "queued":
+      return "Queued…";
+    case "running":
+      return "Running…";
+    case "passed":
+    case "failed":
+    case "error":
+      return "Run tests again";
+    default:
+      return "Run tests";
+  }
+}
+
 // Per-line color for a unified diff, by prefix only -- deliberately not a
 // real diff parse (no hunk/file-boundary awareness), per the "keep it
 // simple" steer for this view. This also colors the `+++`/`---` file-header
@@ -320,6 +384,123 @@ function CodeChangeView({ codeChange }: { codeChange: CodeChange }) {
               No diff available.
             </p>
           )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Renders a captured stdout+stderr blob monospace, scrollable rather than
+// truncated (output can be a full pytest/jest log) -- same box treatment as
+// `DiffView` above, minus the per-line coloring since this isn't a diff.
+// `tone` swaps the box's color to match the surrounding verdict: red for a
+// failed run's log, neutral for a passed run's (the log itself isn't the
+// alarming part when tests passed).
+function OutputView({
+  output,
+  tone,
+}: {
+  output: string;
+  tone: "neutral" | "red";
+}) {
+  return (
+    <pre
+      className={`max-h-[32rem] overflow-auto whitespace-pre-wrap break-words rounded-md px-3 py-2 text-xs ${
+        tone === "red"
+          ? "bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-400"
+          : "bg-black/[.03] text-zinc-800 dark:bg-white/[.04] dark:text-zinc-200"
+      }`}
+    >
+      <code>{output}</code>
+    </pre>
+  );
+}
+
+// Mirrors `CodeChangeView` above: status row first, then a
+// status-dependent content region -- but with a three-way terminal split
+// (passed/failed/error) instead of two, per the distinction called out on
+// `TEST_RUN_STATUS_DOT_CLASS`.
+function TestRunView({ testRun }: { testRun: TestRun }) {
+  const isPending = isPendingTestRunStatus(testRun.status);
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          aria-hidden
+          className={`h-2 w-2 shrink-0 rounded-full ${
+            TEST_RUN_STATUS_DOT_CLASS[testRun.status] ?? ""
+          }`}
+        />
+        <span className="text-sm text-zinc-600 dark:text-zinc-400">
+          {TEST_RUN_STATUS_LABEL[testRun.status] ?? testRun.status}
+          {" · "}
+          <span
+            title={formatAbsoluteTime(testRun.created_at)}
+            suppressHydrationWarning
+          >
+            {formatRelativeTime(testRun.created_at)}
+          </span>
+        </span>
+      </div>
+
+      {testRun.status === "error" ? (
+        <div className="flex flex-col gap-2">
+          <SectionHeading>No test verdict</SectionHeading>
+          <p className="whitespace-pre-wrap break-words rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800 dark:border-orange-900/50 dark:bg-orange-950/30 dark:text-orange-400">
+            {testRun.output ??
+              "Something went wrong before a test verdict could be reached."}
+          </p>
+        </div>
+      ) : isPending ? (
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-zinc-500 dark:text-zinc-400"
+        >
+          <span
+            aria-hidden
+            className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-400"
+          />
+          <span>
+            {testRun.status === "queued"
+              ? "Queued for test run…"
+              : "Running tests…"}{" "}
+            This usually takes 30 seconds to several minutes.
+          </span>
+        </div>
+      ) : testRun.status === "failed" ? (
+        <div className="flex flex-col gap-2">
+          <SectionHeading>Tests failed</SectionHeading>
+          {typeof testRun.exit_code === "number" ? (
+            <p className="text-sm text-red-700 dark:text-red-400">
+              Exit code {testRun.exit_code}
+            </p>
+          ) : null}
+          {testRun.command ? (
+            <p className="break-all font-mono text-xs text-zinc-600 dark:text-zinc-400">
+              $ {testRun.command}
+            </p>
+          ) : null}
+          {testRun.output ? (
+            <OutputView output={testRun.output} tone="red" />
+          ) : (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              No output captured.
+            </p>
+          )}
+        </div>
+      ) : testRun.status === "passed" ? (
+        <div className="flex flex-col gap-2">
+          <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-400">
+            All tests passed.
+          </p>
+          {testRun.command ? (
+            <p className="break-all font-mono text-xs text-zinc-600 dark:text-zinc-400">
+              $ {testRun.command}
+            </p>
+          ) : null}
+          {testRun.output ? (
+            <OutputView output={testRun.output} tone="neutral" />
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -439,6 +620,41 @@ export default function IssueDetailPage() {
     }
   }, [issue, repositoryId, issueId, loadIssue]);
 
+  // --- Test run (Sandbox Test Runner) ---
+  const [testRunRequesting, setTestRunRequesting] = useState(false);
+  const [testRunError, setTestRunError] = useState<string | null>(null);
+
+  const handleRunTests = useCallback(async () => {
+    // Unlike `handleGenerateCode`'s regenerate, this deliberately skips a
+    // confirm() gate: re-running tests doesn't discard anything the user
+    // authored or would mind losing, it just re-executes the same diff
+    // against the same test suite again and replaces a derived result --
+    // a lot less destructive than discarding a generated diff.
+    setTestRunRequesting(true);
+    setTestRunError(null);
+    try {
+      const updated = await apiFetch<Issue>(
+        `/api/repositories/${repositoryId}/issues/${issueId}/test-runs`,
+        { method: "POST" },
+      );
+      setIssue(updated);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        // Same reasoning as handleGenerateCode's 409 handling: resync
+        // instead of showing a stale error.
+        await loadIssue();
+      } else if (error instanceof ApiError && error.status === 429) {
+        setTestRunError(
+          "Too many test run requests — wait a moment and try again.",
+        );
+      } else {
+        setTestRunError("Couldn't start the test run, try again.");
+      }
+    } finally {
+      setTestRunRequesting(false);
+    }
+  }, [repositoryId, issueId, loadIssue]);
+
   // Protected route: bounce signed-out visitors back to the landing page.
   useEffect(() => {
     if (!userLoading && !user) {
@@ -461,23 +677,27 @@ export default function IssueDetailPage() {
   const isGenerationPending = issue?.code_change
     ? isPendingGenerationStatus(issue.code_change.generation_status)
     : false;
+  const isTestRunPending = issue?.code_change?.test_run
+    ? isPendingTestRunStatus(issue.code_change.test_run.status)
+    : false;
 
-  // Poll while the issue is queued/planning, or its code_change is
-  // queued/generating, so either one resolves without a manual refresh --
-  // stopping once neither is pending any more. One shared interval (rather
-  // than a second one scoped to code_change) since both conditions just
-  // mean "re-fetch this same issue"; `loadIssue` itself already guards
-  // against out-of-order responses via `issueRequestId`. Same pattern as
-  // the list page's poll, scoped to this one issue instead of a list.
+  // Poll while the issue is queued/planning, its code_change is
+  // queued/generating, or its test_run is queued/running, so any of the
+  // three resolves without a manual refresh -- stopping once none is
+  // pending any more. One shared interval (rather than a third one scoped
+  // to test_run) since all three conditions just mean "re-fetch this same
+  // issue"; `loadIssue` itself already guards against out-of-order
+  // responses via `issueRequestId`. Same pattern as the list page's poll,
+  // scoped to this one issue instead of a list.
   useEffect(() => {
-    if (!isPending && !isGenerationPending) {
+    if (!isPending && !isGenerationPending && !isTestRunPending) {
       return;
     }
     const intervalId = setInterval(() => {
       loadIssue();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(intervalId);
-  }, [isPending, isGenerationPending, loadIssue]);
+  }, [isPending, isGenerationPending, isTestRunPending, loadIssue]);
 
   if (userLoading || !user) {
     return (
@@ -613,6 +833,36 @@ export default function IssueDetailPage() {
                 ) : (
                   <p className="text-sm text-zinc-500 dark:text-zinc-400">
                     No code has been generated for this issue yet.
+                  </p>
+                )}
+              </div>
+            ) : null}
+
+            {issue.code_change?.generation_status === "generated" ? (
+              <div className="flex flex-col gap-4 border-t border-black/[.08] pt-6 dark:border-white/[.145]">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <SectionHeading>Test run</SectionHeading>
+                  <button
+                    type="button"
+                    onClick={handleRunTests}
+                    disabled={testRunRequesting || isTestRunPending}
+                    className="shrink-0 rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:opacity-50 dark:bg-zinc-50 dark:text-zinc-950 dark:hover:bg-zinc-200"
+                  >
+                    {testRunButtonLabel(issue.code_change.test_run, testRunRequesting)}
+                  </button>
+                </div>
+
+                {testRunError ? (
+                  <p className="text-sm text-red-600 dark:text-red-400">
+                    {testRunError}
+                  </p>
+                ) : null}
+
+                {issue.code_change.test_run ? (
+                  <TestRunView testRun={issue.code_change.test_run} />
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                    No tests have been run for this issue yet.
                   </p>
                 )}
               </div>

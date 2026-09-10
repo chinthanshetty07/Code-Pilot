@@ -9,7 +9,9 @@ from app.core.db import async_session_factory
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
 from app.models.repository import Repository
+from app.models.test_run import TestRun
 from app.services.indexing import index_repository
+from app.services.test_runner import run_tests
 
 
 async def index_repository_task(ctx: dict, repository_id: str) -> dict:
@@ -52,3 +54,22 @@ async def create_code_change_task(ctx: dict, code_change_id: str) -> dict:
 
         await create_code_change(db, code_change)
         return {"status": code_change.generation_status}
+
+
+async def create_test_run_task(ctx: dict, test_run_id: str) -> dict:
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(TestRun)
+            .options(
+                selectinload(TestRun.code_change)
+                .selectinload(CodeChange.issue)
+                .selectinload(Issue.repository)
+            )
+            .where(TestRun.id == uuid.UUID(test_run_id))
+        )
+        test_run = result.scalar_one_or_none()
+        if test_run is None:
+            return {"status": "error", "message": "test_run not found"}
+
+        await run_tests(db, test_run)
+        return {"status": test_run.status}

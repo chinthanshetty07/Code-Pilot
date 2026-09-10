@@ -93,18 +93,30 @@ class Workspace:
             )
         path.write_text(content.replace(old_string, new_string), encoding="utf-8")
 
-    async def _run_git(self, *args: str) -> str:
+    async def _run_git(self, *args: str, input_text: str | None = None) -> str:
         process = await asyncio.create_subprocess_exec(
             "git",
             *args,
             cwd=self.root,
+            stdin=asyncio.subprocess.PIPE if input_text is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate()
+        stdin_bytes = input_text.encode("utf-8") if input_text is not None else None
+        stdout, stderr = await process.communicate(input=stdin_bytes)
         if process.returncode != 0:
             raise WorkspaceError(f"git {' '.join(args)} failed: {stderr.decode(errors='replace')}")
         return stdout.decode(errors="replace")
+
+    async def apply_diff(self, diff: str) -> None:
+        """Applies a unified diff (as produced by git_diff) to the working
+        tree -- used to reconstruct a Coder agent run's edited state in a
+        fresh workspace later (e.g. for the test runner), since the
+        original workspace is ephemeral and cleaned up right after its own
+        job finishes. Reconstructing from the stored diff rather than
+        keeping the original workspace around works correctly regardless of
+        how much later, or on which worker process, that happens."""
+        await self._run_git("apply", "-", input_text=diff)
 
     async def git_diff(self) -> str:
         """Stages everything (including new/deleted files) and diffs

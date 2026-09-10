@@ -10,10 +10,19 @@ from app.core.sessions import get_current_user
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
 from app.models.repository import Repository
+from app.models.test_run import TestRun
 from app.models.user import User
 from app.schemas.issue import IssueCreateIn, IssueOut
 
 router = APIRouter(tags=["issues"])
+
+# Full eager-load chain for an Issue's nested plan/code_change/test_run --
+# used everywhere an Issue is queried, since IssueOut always serializes all
+# three and none of them support an async lazy load outside an awaited call.
+_ISSUE_LOAD_OPTIONS = (
+    selectinload(Issue.plan),
+    selectinload(Issue.code_change).selectinload(CodeChange.test_run),
+)
 
 
 async def _get_owned_repository(db: AsyncSession, repository_id: str, user: User) -> Repository:
@@ -28,7 +37,7 @@ async def _get_owned_issue(
 ) -> Issue:
     result = await db.execute(
         select(Issue)
-        .options(selectinload(Issue.plan), selectinload(Issue.code_change))
+        .options(*_ISSUE_LOAD_OPTIONS)
         .join(Repository, Issue.repository_id == Repository.id)
         .where(
             Issue.id == issue_id,
@@ -87,7 +96,7 @@ async def list_issues(
 
     result = await db.execute(
         select(Issue)
-        .options(selectinload(Issue.plan), selectinload(Issue.code_change))
+        .options(*_ISSUE_LOAD_OPTIONS)
         .where(Issue.repository_id == repository_id)
         .order_by(Issue.created_at.desc())
     )
@@ -140,15 +149,68 @@ async def create_code_change(
     else:
         # Regenerating replaces the previous attempt rather than keeping a
         # history of them -- matches this milestone's scope (see CodeChange).
+        # Any test_run for the old diff is discarded too (cascade, via
+        # setting the relationship to None) -- a stale test result for code
+        # that no longer exists would be actively misleading, not just
+        # unhelpful.
         code_change = issue.code_change
         code_change.generation_status = "queued"
         code_change.generation_error = None
         code_change.summary = None
         code_change.diff = None
+        code_change.test_run = None
     await db.commit()
     await db.refresh(issue, attribute_names=["plan", "code_change"])
 
     pool = await get_arq_pool()
     await pool.enqueue_job("create_code_change_task", str(code_change.id))
+
+    return issue
+
+
+@router.post(
+    "/api/repositories/{repository_id}/issues/{issue_id}/test-runs",
+    response_model=IssueOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_test_run(
+    repository_id: str,
+    issue_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Issue:
+    await rate_limit(request, key="create_test_run", limit=10, window_seconds=60)
+
+    issue = await _get_owned_issue(db, repository_id, issue_id, user)
+
+    if issue.code_change is None or issue.code_change.generation_status != "generated":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This issue doesn't have generated code to test yet",
+        )
+    existing = issue.code_change.test_run
+    if existing is not None and existing.status in ("queued", "running"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="A test run is already in progress"
+        )
+
+    if existing is None:
+        test_run = TestRun(code_change_id=issue.code_change.id, status="queued")
+        db.add(test_run)
+    else:
+        # Re-running replaces the previous result rather than keeping a
+        # history of attempts -- same reasoning as CodeChange regeneration.
+        test_run = existing
+        test_run.status = "queued"
+        test_run.command = None
+        test_run.output = None
+        test_run.exit_code = None
+    await db.commit()
+    await db.refresh(issue, attribute_names=["plan", "code_change"])
+    await db.refresh(issue.code_change, attribute_names=["test_run"])
+
+    pool = await get_arq_pool()
+    await pool.enqueue_job("create_test_run_task", str(test_run.id))
 
     return issue
