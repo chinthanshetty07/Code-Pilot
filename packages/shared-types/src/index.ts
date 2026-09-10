@@ -62,3 +62,31 @@ export interface SearchResult {
   content: string;
   score: number;
 }
+
+export interface PlanRelevantFile {
+  file_path: string;
+  reason: string;
+}
+
+export interface Plan {
+  id: string;
+  summary: string;
+  relevant_files: PlanRelevantFile[];
+  implementation_steps: string[];
+  tests_to_add_or_change: string[];
+  risks: string[];
+  created_at: string;
+}
+
+// planning_status is "queued" | "planning" | "planned" | "failed" on the
+// backend (app/models/issue.py) -- left as `string` for the same reason as
+// SearchResult.chunk_type above.
+export interface Issue {
+  id: string;
+  repository_id: string;
+  description: string;
+  planning_status: string;
+  planning_error: string | null;
+  created_at: string;
+  plan: Plan | null;
+}

@@ -80,3 +80,23 @@ def test_index_repository_requires_authentication(client: TestClient) -> None:
     response = client.post("/api/repositories/does-not-matter/index")
 
     assert response.status_code == 401
+
+
+def test_search_repository_requires_authentication(client: TestClient) -> None:
+    response = client.get("/api/repositories/does-not-matter/search?q=test")
+
+    assert response.status_code == 401
+
+
+def test_create_issue_requires_authentication(client: TestClient) -> None:
+    response = client.post(
+        "/api/repositories/does-not-matter/issues", json={"description": "fix it"}
+    )
+
+    assert response.status_code == 401
+
+
+def test_list_issues_requires_authentication(client: TestClient) -> None:
+    response = client.get("/api/repositories/does-not-matter/issues")
+
+    assert response.status_code == 401

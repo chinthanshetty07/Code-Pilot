@@ -535,6 +535,14 @@ export default function RepositoriesPage() {
                       >
                         Search
                       </button>
+                      <button
+                        type="button"
+                        disabled={!isRepoSearchable(repo)}
+                        onClick={() => router.push(`/repositories/${repo.id}/issues`)}
+                        className="shrink-0 rounded-md border border-black/[.08] px-3 py-1.5 text-sm font-medium text-zinc-950 transition-colors hover:bg-black/[.04] disabled:cursor-default disabled:opacity-50 dark:border-white/[.145] dark:text-zinc-50 dark:hover:bg-white/[.06]"
+                      >
+                        Issues
+                      </button>
                     </div>
                   </li>
                 );
