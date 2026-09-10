@@ -24,7 +24,10 @@ def _server_error() -> errors.APIError:
 
 async def test_embed_empty_list_makes_no_requests() -> None:
     provider = GeminiEmbeddingProvider(api_key="fake", model="gemini-embedding-001")
-    provider._client.aio.models.embed_content = AsyncMock()
+    # Monkeypatching a bound method for test doubles is the standard,
+    # correct mocking pattern here -- mypy just doesn't have a way to
+    # express "this instance's method is being replaced for a test".
+    provider._client.aio.models.embed_content = AsyncMock()  # type: ignore[method-assign]
 
     result = await provider.embed([])
 
@@ -34,7 +37,8 @@ async def test_embed_empty_list_makes_no_requests() -> None:
 
 async def test_embed_single_text_returns_its_vector() -> None:
     provider = GeminiEmbeddingProvider(api_key="fake", model="gemini-embedding-001")
-    provider._client.aio.models.embed_content = AsyncMock(
+    # See test_embed_empty_list_makes_no_requests for why this is ignored.
+    provider._client.aio.models.embed_content = AsyncMock(  # type: ignore[method-assign]
         return_value=_fake_response([0.1, 0.2, 0.3])
     )
 
@@ -58,7 +62,10 @@ async def test_embed_preserves_order_across_concurrent_requests() -> None:
             await __import__("asyncio").sleep(0.02)
         return _fake_response([float(len(contents))])
 
-    provider._client.aio.models.embed_content = AsyncMock(side_effect=fake_embed_content)
+    # See test_embed_empty_list_makes_no_requests for why this is ignored.
+    provider._client.aio.models.embed_content = AsyncMock(  # type: ignore[method-assign]
+        side_effect=fake_embed_content
+    )
 
     result = await provider.embed(["first", "second"])
 
@@ -69,7 +76,8 @@ async def test_embed_retries_on_rate_limit_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = GeminiEmbeddingProvider(api_key="fake", model="gemini-embedding-001")
-    provider._client.aio.models.embed_content = AsyncMock(
+    # See test_embed_empty_list_makes_no_requests for why this is ignored.
+    provider._client.aio.models.embed_content = AsyncMock(  # type: ignore[method-assign]
         side_effect=[_rate_limit_error(), _rate_limit_error(), _fake_response([1.0])]
     )
     monkeypatch.setattr("app.rag.embeddings.asyncio.sleep", AsyncMock(return_value=None))
@@ -82,7 +90,10 @@ async def test_embed_retries_on_rate_limit_then_succeeds(
 
 async def test_embed_does_not_retry_non_rate_limit_errors() -> None:
     provider = GeminiEmbeddingProvider(api_key="fake", model="gemini-embedding-001")
-    provider._client.aio.models.embed_content = AsyncMock(side_effect=_server_error())
+    # See test_embed_empty_list_makes_no_requests for why this is ignored.
+    provider._client.aio.models.embed_content = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_server_error()
+    )
 
     with pytest.raises(errors.APIError) as exc_info:
         await provider.embed(["boom"])
@@ -95,7 +106,10 @@ async def test_embed_gives_up_after_max_retries(monkeypatch: pytest.MonkeyPatch)
     import app.rag.embeddings as embeddings_module
 
     provider = GeminiEmbeddingProvider(api_key="fake", model="gemini-embedding-001")
-    provider._client.aio.models.embed_content = AsyncMock(side_effect=_rate_limit_error())
+    # See test_embed_empty_list_makes_no_requests for why this is ignored.
+    provider._client.aio.models.embed_content = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_rate_limit_error()
+    )
     monkeypatch.setattr("app.rag.embeddings.asyncio.sleep", AsyncMock(return_value=None))
 
     with pytest.raises(errors.APIError) as exc_info:
@@ -107,7 +121,10 @@ async def test_embed_gives_up_after_max_retries(monkeypatch: pytest.MonkeyPatch)
 
 async def test_gemini_embed_query_uses_retrieval_query_task_type() -> None:
     provider = GeminiEmbeddingProvider(api_key="fake", model="gemini-embedding-001")
-    provider._client.aio.models.embed_content = AsyncMock(return_value=_fake_response([0.5, 0.6]))
+    # See test_embed_empty_list_makes_no_requests for why this is ignored.
+    provider._client.aio.models.embed_content = AsyncMock(  # type: ignore[method-assign]
+        return_value=_fake_response([0.5, 0.6])
+    )
 
     result = await provider.embed_query("how do I log out")
 
@@ -123,7 +140,9 @@ async def test_openai_embed_query_delegates_to_embed() -> None:
     fake_item.embedding = [0.7, 0.8]
     fake_response = MagicMock()
     fake_response.data = [fake_item]
-    provider._client.embeddings = MagicMock()
+    # AsyncOpenAI.embeddings is a read-only property in the stub; replacing
+    # it wholesale on a test double is the standard mocking pattern here.
+    provider._client.embeddings = MagicMock()  # type: ignore[misc]
     provider._client.embeddings.create = AsyncMock(return_value=fake_response)
 
     result = await provider.embed_query("how do I log out")

@@ -1,7 +1,10 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
+from google.genai import errors as genai_errors
 from groq import BadRequestError as GroqBadRequestError
+from groq import RateLimitError as GroqRateLimitError
 
 from app.llm.provider import GeminiLLMProvider, GroqLLMProvider, Message, ToolCall, ToolSpec
 
@@ -27,7 +30,10 @@ def _groq_tool_call_response(name: str, arguments: str) -> MagicMock:
 
 async def test_groq_parses_tool_call_from_response() -> None:
     provider = GroqLLMProvider(api_key="fake", model="openai/gpt-oss-120b")
-    provider._client.chat.completions.create = AsyncMock(
+    # Monkeypatching a bound method for test doubles is the standard,
+    # correct mocking pattern here -- mypy just doesn't have a way to
+    # express "this instance's method is being replaced for a test".
+    provider._client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
         return_value=_groq_tool_call_response("get_weather", '{"city": "Paris"}')
     )
 
@@ -46,7 +52,10 @@ async def test_groq_round_trips_a_tool_result_message() -> None:
     provider = GroqLLMProvider(api_key="fake", model="openai/gpt-oss-120b")
     final = MagicMock()
     final.choices = [MagicMock(message=MagicMock(content="It's sunny.", tool_calls=None))]
-    provider._client.chat.completions.create = AsyncMock(return_value=final)
+    # See test_groq_parses_tool_call_from_response for why this is ignored.
+    provider._client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
+        return_value=final
+    )
 
     messages = [
         Message(role="user", content="weather?"),
@@ -78,7 +87,8 @@ async def test_groq_recovers_from_a_hallucinated_tool_call_schema() -> None:
     fake_response = httpx.Response(
         400, request=httpx.Request("POST", "https://api.groq.com/x"), json={"error": {}}
     )
-    provider._client.chat.completions.create = AsyncMock(
+    # See test_groq_parses_tool_call_from_response for why this is ignored.
+    provider._client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
         side_effect=GroqBadRequestError(
             "Tool call validation failed: missing properties: 'query'",
             response=fake_response,
@@ -97,7 +107,8 @@ async def test_groq_recovers_from_a_hallucinated_tool_call_schema() -> None:
 
 async def test_groq_sets_tool_choice_when_force_tool_is_given() -> None:
     provider = GroqLLMProvider(api_key="fake", model="openai/gpt-oss-120b")
-    provider._client.chat.completions.create = AsyncMock(
+    # See test_groq_parses_tool_call_from_response for why this is ignored.
+    provider._client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
         return_value=_groq_tool_call_response("submit_plan", "{}")
     )
 
@@ -114,7 +125,10 @@ async def test_groq_sets_tool_choice_when_force_tool_is_given() -> None:
 
 async def test_groq_leaves_tool_choice_unset_without_force_tool() -> None:
     provider = GroqLLMProvider(api_key="fake", model="openai/gpt-oss-120b")
-    provider._client.chat.completions.create = AsyncMock(
+    # Monkeypatching a bound method for test doubles is the standard,
+    # correct mocking pattern here -- mypy just doesn't have a way to
+    # express "this instance's method is being replaced for a test".
+    provider._client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
         return_value=_groq_tool_call_response("get_weather", '{"city": "Paris"}')
     )
 
@@ -127,6 +141,51 @@ async def test_groq_leaves_tool_choice_unset_without_force_tool() -> None:
     # tool_choice=None differently from the kwarg being absent (see the
     # regression this guards against, in provider.py).
     assert "tool_choice" not in call_kwargs
+
+
+def _groq_rate_limit_error() -> GroqRateLimitError:
+    fake_response = httpx.Response(
+        429, request=httpx.Request("POST", "https://api.groq.com/x"), json={"error": {}}
+    )
+    return GroqRateLimitError("rate limited", response=fake_response, body=None)
+
+
+async def test_groq_retries_on_rate_limit_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = GroqLLMProvider(api_key="fake", model="openai/gpt-oss-120b")
+    # See test_groq_parses_tool_call_from_response for why this is ignored.
+    provider._client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            _groq_rate_limit_error(),
+            _groq_rate_limit_error(),
+            _groq_tool_call_response("get_weather", '{"city": "Paris"}'),
+        ]
+    )
+    monkeypatch.setattr("app.llm.provider.asyncio.sleep", AsyncMock(return_value=None))
+
+    result = await provider.complete(
+        [Message(role="user", content="weather?")], tools=[WEATHER_TOOL], system="sys"
+    )
+
+    assert result.tool_calls == [
+        ToolCall(id="call_abc", name="get_weather", arguments={"city": "Paris"})
+    ]
+    assert provider._client.chat.completions.create.await_count == 3
+
+
+async def test_groq_gives_up_after_max_retries_on_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GroqLLMProvider(api_key="fake", model="openai/gpt-oss-120b")
+    # See test_groq_parses_tool_call_from_response for why this is ignored.
+    provider._client.chat.completions.create = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_groq_rate_limit_error()
+    )
+    monkeypatch.setattr("app.llm.provider.asyncio.sleep", AsyncMock(return_value=None))
+
+    with pytest.raises(GroqRateLimitError):
+        await provider.complete(
+            [Message(role="user", content="weather?")], tools=[WEATHER_TOOL], system="sys"
+        )
 
 
 def _gemini_function_call_part(name: str, args: dict, thought_signature: bytes | None) -> MagicMock:
@@ -149,7 +208,12 @@ async def test_gemini_parses_tool_call_and_captures_thought_signature() -> None:
     )
     response = MagicMock()
     response.candidates = [MagicMock(content=MagicMock(parts=[part]))]
-    provider._client.aio.models.generate_content = AsyncMock(return_value=response)
+    # Monkeypatching a bound method for test doubles is the standard,
+    # correct mocking pattern here -- mypy just doesn't have a way to
+    # express "this instance's method is being replaced for a test".
+    provider._client.aio.models.generate_content = AsyncMock(  # type: ignore[method-assign]
+        return_value=response
+    )
 
     result = await provider.complete(
         [Message(role="user", content="weather?")], tools=[WEATHER_TOOL], system="sys"
@@ -169,7 +233,11 @@ async def test_gemini_replays_thought_signature_on_the_next_turn() -> None:
     final_part = MagicMock(function_call=None, text="Sunny.")
     final = MagicMock()
     final.candidates = [MagicMock(content=MagicMock(parts=[final_part]))]
-    provider._client.aio.models.generate_content = AsyncMock(return_value=final)
+    # See test_gemini_parses_tool_call_and_captures_thought_signature for
+    # why this is ignored.
+    provider._client.aio.models.generate_content = AsyncMock(  # type: ignore[method-assign]
+        return_value=final
+    )
 
     messages = [
         Message(role="user", content="weather?"),
@@ -201,7 +269,11 @@ async def test_gemini_sets_tool_config_when_force_tool_is_given() -> None:
     part = _gemini_function_call_part("submit_plan", {}, thought_signature=None)
     response = MagicMock()
     response.candidates = [MagicMock(content=MagicMock(parts=[part]))]
-    provider._client.aio.models.generate_content = AsyncMock(return_value=response)
+    # See test_gemini_parses_tool_call_and_captures_thought_signature for
+    # why this is ignored.
+    provider._client.aio.models.generate_content = AsyncMock(  # type: ignore[method-assign]
+        return_value=response
+    )
 
     await provider.complete(
         [Message(role="user", content="go")],
@@ -220,7 +292,11 @@ async def test_gemini_leaves_tool_config_unset_without_force_tool() -> None:
     part = _gemini_function_call_part("get_weather", {"city": "Paris"}, thought_signature=None)
     response = MagicMock()
     response.candidates = [MagicMock(content=MagicMock(parts=[part]))]
-    provider._client.aio.models.generate_content = AsyncMock(return_value=response)
+    # See test_gemini_parses_tool_call_and_captures_thought_signature for
+    # why this is ignored.
+    provider._client.aio.models.generate_content = AsyncMock(  # type: ignore[method-assign]
+        return_value=response
+    )
 
     await provider.complete(
         [Message(role="user", content="go")], tools=[WEATHER_TOOL], system="sys"
@@ -228,3 +304,63 @@ async def test_gemini_leaves_tool_config_unset_without_force_tool() -> None:
 
     config = provider._client.aio.models.generate_content.call_args.kwargs["config"]
     assert config.tool_config is None
+
+
+async def test_gemini_retries_on_rate_limit_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = GeminiLLMProvider(api_key="fake", model="gemini-3.6-flash")
+    part = _gemini_function_call_part("get_weather", {"city": "Paris"}, thought_signature=None)
+    response = MagicMock()
+    response.candidates = [MagicMock(content=MagicMock(parts=[part]))]
+    rate_limit_error = genai_errors.APIError(code=429, response_json={"error": {}})
+    # See test_gemini_parses_tool_call_and_captures_thought_signature for
+    # why this is ignored.
+    provider._client.aio.models.generate_content = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[rate_limit_error, rate_limit_error, response]
+    )
+    monkeypatch.setattr("app.llm.provider.asyncio.sleep", AsyncMock(return_value=None))
+
+    result = await provider.complete(
+        [Message(role="user", content="weather?")], tools=[WEATHER_TOOL], system="sys"
+    )
+
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "get_weather"
+    assert provider._client.aio.models.generate_content.await_count == 3
+
+
+async def test_gemini_gives_up_after_max_retries_on_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GeminiLLMProvider(api_key="fake", model="gemini-3.6-flash")
+    rate_limit_error = genai_errors.APIError(code=429, response_json={"error": {}})
+    # See test_gemini_parses_tool_call_and_captures_thought_signature for
+    # why this is ignored.
+    provider._client.aio.models.generate_content = AsyncMock(  # type: ignore[method-assign]
+        side_effect=rate_limit_error
+    )
+    monkeypatch.setattr("app.llm.provider.asyncio.sleep", AsyncMock(return_value=None))
+
+    with pytest.raises(genai_errors.APIError):
+        await provider.complete(
+            [Message(role="user", content="weather?")], tools=[WEATHER_TOOL], system="sys"
+        )
+
+
+async def test_gemini_does_not_retry_non_rate_limit_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = GeminiLLMProvider(api_key="fake", model="gemini-3.6-flash")
+    server_error = genai_errors.APIError(code=500, response_json={"error": {}})
+    # See test_gemini_parses_tool_call_and_captures_thought_signature for
+    # why this is ignored.
+    provider._client.aio.models.generate_content = AsyncMock(  # type: ignore[method-assign]
+        side_effect=server_error
+    )
+    sleep_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.llm.provider.asyncio.sleep", sleep_mock)
+
+    with pytest.raises(genai_errors.APIError):
+        await provider.complete(
+            [Message(role="user", content="weather?")], tools=[WEATHER_TOOL], system="sys"
+        )
+
+    sleep_mock.assert_not_awaited()
+    assert provider._client.aio.models.generate_content.await_count == 1

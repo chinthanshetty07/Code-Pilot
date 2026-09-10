@@ -1,3 +1,5 @@
+import uuid
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
@@ -38,6 +40,15 @@ async def list_github_repos(
     client = await _github_client_for(user, db)
     try:
         repos = await client.list_repositories()
+    except httpx.HTTPStatusError as exc:
+        # Unlike connect_repository's get_repository_by_id call, there's no
+        # single-resource "not found" case here -- any failure listing the
+        # user's own repos means GitHub rejected the stored token (revoked/
+        # expired) or is rate-limiting this server, not a bad client input.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Couldn't fetch your GitHub repositories right now -- try again shortly.",
+        ) from exc
     finally:
         await client.aclose()
 
@@ -111,7 +122,7 @@ async def connect_repository(
 
 @router.get("/api/repositories/{repository_id}", response_model=RepositoryOut)
 async def get_repository(
-    repository_id: str,
+    repository_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Repository:
@@ -123,14 +134,19 @@ async def get_repository(
 
 @router.post("/api/repositories/{repository_id}/index", response_model=RepositoryOut)
 async def trigger_repository_indexing(
-    repository_id: str,
+    repository_id: uuid.UUID,
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Repository:
     await rate_limit(request, key="repository_index", limit=10, window_seconds=60)
 
-    repository = await db.get(Repository, repository_id)
+    # Locks the row for the rest of this transaction so two concurrent
+    # requests (double-click, retried call) can't both read
+    # indexing_status as "not in progress" and both enqueue a job -- see
+    # the identical reasoning on _get_owned_issue's for_update parameter
+    # in app/api/issues.py.
+    repository = await db.get(Repository, repository_id, with_for_update=True)
     if repository is None or repository.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
 
@@ -152,7 +168,7 @@ async def trigger_repository_indexing(
 
 @router.get("/api/repositories/{repository_id}/search", response_model=list[SearchResultOut])
 async def search_repository(
-    repository_id: str,
+    repository_id: uuid.UUID,
     request: Request,
     q: str = Query(..., min_length=1, max_length=500),
     limit: int = Query(20, ge=1, le=50),
@@ -170,7 +186,7 @@ async def search_repository(
 
 @router.get("/api/repositories/{repository_id}/usage", response_model=UsageSummaryOut)
 async def get_repository_usage(
-    repository_id: str,
+    repository_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> UsageSummary:

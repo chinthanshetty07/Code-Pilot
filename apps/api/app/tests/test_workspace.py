@@ -208,6 +208,62 @@ async def test_push_branch_creates_the_branch_on_a_real_remote(workspace: Worksp
         shutil.rmtree(remote_root, ignore_errors=True)
 
 
+async def _make_independent_workspace(commit_message: str) -> Workspace:
+    """A second, wholly independent local repo (its own `git init`, its own
+    unpinned-timestamp initial commit) -- standing in for a *second*
+    create_workspace call, e.g. a retried create_pull_request attempt.
+    Deliberately not built from the shared `workspace` fixture: the point
+    is that its history shares no common ancestor with another workspace's,
+    the same way two real create_workspace calls never do."""
+    root = Path(tempfile.mkdtemp(prefix="workspace-test-retry-"))
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text("def greet(name):\n    return f'hello {name}'\n")
+    ws = Workspace(root)
+    await ws._run_git("init", "-q")
+    await ws._run_git("config", "user.email", "test@localhost")
+    await ws._run_git("config", "user.name", "Test")
+    await ws._run_git("add", "-A")
+    await ws._run_git("commit", "-q", "-m", commit_message)
+    return ws
+
+
+async def test_push_branch_succeeds_retrying_a_branch_from_an_unrelated_local_history(
+    workspace: Workspace,
+) -> None:
+    """Regression test for a real bug: create_workspace pins no commit
+    timestamp, so a retried PR-creation attempt (branch push succeeded,
+    the follow-up "open the PR" API call failed) builds a local history
+    with no common ancestor with the first attempt's, even for the exact
+    same diff. Without --force, this second push is rejected as
+    non-fast-forward -- permanently stuck retrying the same way forever."""
+    remote_root = await _make_bare_remote()
+    retry_workspace = await _make_independent_workspace("Initial state")
+    try:
+        workspace.edit_file("src/app.py", "hello {name}", "hi {name}")
+        await workspace.commit_all("Say hi instead of hello")
+        await workspace.push_branch(str(remote_root), "codepilot/test-branch")
+
+        retry_workspace.edit_file("src/app.py", "hello {name}", "hi {name}")
+        await retry_workspace.commit_all("Say hi instead of hello")
+
+        first_head = (await workspace._run_git("rev-parse", "HEAD")).strip()
+        retry_head = (await retry_workspace._run_git("rev-parse", "HEAD")).strip()
+        assert first_head != retry_head  # genuinely unrelated commits, same content
+
+        # Must not raise -- a plain (non-forced) push here would be
+        # rejected as non-fast-forward.
+        await retry_workspace.push_branch(str(remote_root), "codepilot/test-branch")
+
+        refs = await workspace._run_git(
+            "ls-remote", str(remote_root), "refs/heads/codepilot/test-branch"
+        )
+        assert retry_head in refs
+        assert first_head not in refs  # the remote branch now points at the retry's commit
+    finally:
+        shutil.rmtree(remote_root, ignore_errors=True)
+        retry_workspace.cleanup()
+
+
 async def test_push_branch_never_leaks_a_token_from_the_remote_url_on_failure(
     workspace: Workspace,
 ) -> None:

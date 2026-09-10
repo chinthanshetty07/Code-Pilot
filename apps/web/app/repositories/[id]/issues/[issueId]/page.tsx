@@ -13,21 +13,20 @@ import type {
   UsageSummary,
 } from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
+import { formatAbsoluteTime, formatRelativeTime } from "@/lib/format";
+import {
+  isPendingGenerationStatus,
+  isPendingPlanningStatus,
+  isPendingPRStatus,
+  isPendingReviewStatus,
+  isPendingTestRunStatus,
+} from "@/lib/status";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
 // How often to re-fetch the issue while it's queued/planning. Same interval
 // as the poll on the issues list page and the indexing poll on
 // repositories/page.tsx.
 const POLL_INTERVAL_MS = 2500;
-
-// Statuses that mean "the worker is on it" -- copied verbatim from
-// repositories/[id]/issues/page.tsx so both pages treat the same set of
-// statuses as pending.
-const PENDING_PLANNING_STATUSES = new Set(["queued", "planning"]);
-
-function isPendingPlanningStatus(status: string): boolean {
-  return PENDING_PLANNING_STATUSES.has(status);
-}
 
 // Dot color + label per `planning_status`. Copied verbatim from
 // repositories/[id]/issues/page.tsx -- see that file for the convention
@@ -46,15 +45,6 @@ const PLANNING_STATUS_LABEL: Record<string, string> = {
   failed: "Failed",
 };
 
-// Statuses that mean "the Coder agent is on it" -- same idea as
-// `PENDING_PLANNING_STATUSES` above, scoped to `code_change.generation_status`
-// instead of `issue.planning_status`.
-const PENDING_GENERATION_STATUSES = new Set(["queued", "generating"]);
-
-function isPendingGenerationStatus(status: string): boolean {
-  return PENDING_GENERATION_STATUSES.has(status);
-}
-
 // Dot color + label per `generation_status`. Exact same convention as
 // `PLANNING_STATUS_DOT_CLASS`/`PLANNING_STATUS_LABEL` above, just for the
 // Coder agent's status instead of the Planner's.
@@ -71,17 +61,6 @@ const GENERATION_STATUS_LABEL: Record<string, string> = {
   generated: "Generated",
   failed: "Failed",
 };
-
-// Statuses that mean "the sandbox is on it" -- same idea as
-// `PENDING_GENERATION_STATUSES` above, scoped to `test_run.status`. "fixing"
-// counts as pending too: it's the Milestone 8 fix loop actually working
-// (the Coder agent generating a fix, in between two "running"s), not a
-// resting state.
-const PENDING_TEST_RUN_STATUSES = new Set(["queued", "running", "fixing"]);
-
-function isPendingTestRunStatus(status: string): boolean {
-  return PENDING_TEST_RUN_STATUSES.has(status);
-}
 
 // Must match app/services/test_runner.py's MAX_FIX_ATTEMPTS -- there's no
 // API-level source of truth for this one number, so it's just kept in sync
@@ -121,14 +100,6 @@ const TEST_RUN_STATUS_LABEL: Record<string, string> = {
   error: "Error",
 };
 
-// Statuses that mean "the Reviewer agent is on it" -- same idea as
-// `PENDING_TEST_RUN_STATUSES` above, scoped to `review.status`.
-const PENDING_REVIEW_STATUSES = new Set(["queued", "reviewing"]);
-
-function isPendingReviewStatus(status: string): boolean {
-  return PENDING_REVIEW_STATUSES.has(status);
-}
-
 // Dot color + label per `review.status`. Same convention as
 // `TEST_RUN_STATUS_DOT_CLASS`/`TEST_RUN_STATUS_LABEL` above, with its own
 // three-way terminal split: "approved" is the usual emerald success,
@@ -154,14 +125,6 @@ const REVIEW_STATUS_LABEL: Record<string, string> = {
   failed: "Failed",
 };
 
-// Statuses that mean "CodePilot is pushing/opening it" -- same idea as
-// `PENDING_REVIEW_STATUSES` above, scoped to `pull_request.status`.
-const PENDING_PR_STATUSES = new Set(["queued", "creating"]);
-
-function isPendingPRStatus(status: string): boolean {
-  return PENDING_PR_STATUSES.has(status);
-}
-
 // Dot color + label per `pull_request.status`. Same convention as
 // `REVIEW_STATUS_DOT_CLASS`/`REVIEW_STATUS_LABEL` above, but with only one
 // terminal failure state instead of a three-way split: unlike a test run
@@ -181,42 +144,6 @@ const PR_STATUS_LABEL: Record<string, string> = {
   created: "Created",
   failed: "Failed",
 };
-
-// Small relative-time formatter built on the native `Intl` API. Copied
-// verbatim from repositories/page.tsx -- see that file for why the locale
-// is pinned (not the runtime default): this page is SSR'd on first load
-// like any client component, and an unpinned locale renders differently on
-// the server than in the browser, producing a hydration mismatch.
-function formatRelativeTime(iso: string): string {
-  const diffSeconds = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
-  const divisions: [Intl.RelativeTimeFormatUnit, number][] = [
-    ["year", 60 * 60 * 24 * 365],
-    ["month", 60 * 60 * 24 * 30],
-    ["week", 60 * 60 * 24 * 7],
-    ["day", 60 * 60 * 24],
-    ["hour", 60 * 60],
-    ["minute", 60],
-  ];
-  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  for (const [unit, secondsInUnit] of divisions) {
-    if (Math.abs(diffSeconds) >= secondsInUnit) {
-      return rtf.format(Math.round(diffSeconds / secondsInUnit), unit);
-    }
-  }
-  return rtf.format(diffSeconds, "second");
-}
-
-// Absolute-time label for the `title` tooltip. Locale and time zone are both
-// pinned for the same reason as `formatRelativeTime` above. Copied verbatim
-// from repositories/page.tsx.
-function formatAbsoluteTime(iso: string): string {
-  const formatted = new Date(iso).toLocaleString("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "UTC",
-  });
-  return `${formatted} UTC`;
-}
 
 function SectionHeading({ children }: { children: string }) {
   return (
@@ -312,7 +239,7 @@ function PlanView({ plan }: { plan: Plan }) {
 // Button label for the generate/regenerate action, mirroring
 // `indexButtonLabel`'s convention on repositories/page.tsx: reflects the
 // in-flight POST first, then falls back to the persisted status.
-function generateButtonLabel(
+export function generateButtonLabel(
   codeChange: CodeChange | null,
   isRequesting: boolean,
 ): string {
@@ -340,7 +267,7 @@ function generateButtonLabel(
 // three terminal statuses (passed/failed/error) treated the same way here,
 // since "re-run" is the right label regardless of which terminal state the
 // previous attempt landed in.
-function testRunButtonLabel(
+export function testRunButtonLabel(
   testRun: TestRun | null,
   isRequesting: boolean,
 ): string {
@@ -371,7 +298,7 @@ function testRunButtonLabel(
 // (approved/changes_requested/failed) treated the same way, since
 // "re-request" is the right label regardless of which terminal state the
 // previous review landed in.
-function reviewButtonLabel(review: Review | null, isRequesting: boolean): string {
+export function reviewButtonLabel(review: Review | null, isRequesting: boolean): string {
   if (isRequesting) {
     return "Starting…";
   }
@@ -398,7 +325,7 @@ function reviewButtonLabel(review: Review | null, isRequesting: boolean): string
 // in its place instead of a clickable button once a real PR exists (see
 // PullRequest's own status docstring for why that's a true terminal
 // state, not a replaceable one like the others).
-function pullRequestButtonLabel(
+export function pullRequestButtonLabel(
   pullRequest: PullRequest | null,
   isRequesting: boolean,
 ): string {
@@ -425,7 +352,7 @@ function pullRequestButtonLabel(
 // simple" steer for this view. This also colors the `+++`/`---` file-header
 // lines the same as added/removed content lines, since both start with the
 // same character -- an intentional simplification, not a bug.
-function diffLineClass(line: string): string {
+export function diffLineClass(line: string): string {
   if (line.startsWith("@@")) {
     return "text-sky-700 dark:text-sky-400";
   }
@@ -839,7 +766,7 @@ const USAGE_AGENT_LABEL: Record<string, string> = {
 // Costs here are fractions of a cent in practice -- 4 decimal places is
 // enough precision to show a real nonzero number instead of a
 // rounded-away "$0.00" for a normal-sized call.
-function formatUsd(amount: number): string {
+export function formatUsd(amount: number): string {
   return `$${amount.toFixed(4)}`;
 }
 

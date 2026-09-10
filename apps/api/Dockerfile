@@ -26,4 +26,27 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Migrations run as part of the image's own default startup (not just a
+# separate manual step) so a production deploy always ends up schema-current
+# without depending on a platform-specific "pre-deploy command" feature --
+# checked for Render specifically and its docs don't clearly confirm one
+# exists for Docker-runtime services, so this works everywhere instead of
+# assuming it. Local dev is unaffected: docker-compose.yml's `command:`
+# override for both api and worker replaces this CMD entirely, same as
+# before -- migrations there stay a deliberate, separate `alembic upgrade
+# head` step (every migration in this project gets a manual look before
+# being applied; see any file under alembic/versions for why). `alembic
+# upgrade head` is idempotent (a no-op once already at head), so running it
+# on every container start is equally safe, not just the first.
+#
+# --forwarded-allow-ips='*': on Render (or any PaaS behind an edge proxy),
+# uvicorn's own connecting peer is the proxy, not the real client -- without
+# this, --proxy-headers (on by default) still ignores X-Forwarded-For
+# because --forwarded-allow-ips defaults to '127.0.0.1' only (confirmed via
+# `uvicorn --help`), so request.client.host silently becomes the proxy's own
+# IP for every request in production. That value feeds app/core/rate_limit.py's
+# per-IP key, which would otherwise collapse into one shared bucket for all
+# users. Trusting '*' here is safe: the container has no inbound path except
+# through Render's own edge, same reasoning platforms like Heroku/Railway
+# deployments rely on.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --forwarded-allow-ips='*'"]

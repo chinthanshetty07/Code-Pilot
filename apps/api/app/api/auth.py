@@ -106,7 +106,12 @@ async def github_callback(
         )
         db.add(github_account)
     else:
-        user = await db.get(User, github_account.user_id)
+        existing_user = await db.get(User, github_account.user_id)
+        # github_account.user_id is a NOT NULL FK to users.id (see
+        # GitHubAccount.user_id), and github_account was just loaded from the
+        # DB, so the referenced user row is guaranteed to exist.
+        assert existing_user is not None
+        user = existing_user
         user.username = username
         user.email = email or user.email
         user.name = profile.get("name")

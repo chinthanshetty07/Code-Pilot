@@ -44,6 +44,10 @@ def test_auth_me_requires_authentication(client: TestClient) -> None:
 
 
 def test_auth_me_returns_current_user(client: TestClient) -> None:
+    # TestClient.portal is only non-None while its context manager is
+    # active (see the `client` fixture above, which always enters it) --
+    # the stub types it Optional because that's not expressible statically.
+    assert client.portal is not None
     user = client.portal.call(_create_test_user)
     session_id = client.portal.call(_create_session_for, user.id)
 
@@ -54,6 +58,8 @@ def test_auth_me_returns_current_user(client: TestClient) -> None:
 
 
 def test_logout_clears_session(client: TestClient) -> None:
+    # See test_auth_me_returns_current_user for why this is asserted.
+    assert client.portal is not None
     user = client.portal.call(_create_test_user)
     session_id = client.portal.call(_create_session_for, user.id)
 

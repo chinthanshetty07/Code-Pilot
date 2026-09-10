@@ -40,3 +40,6 @@ pnpm-debug.log*
 
 # --- Docker ---
 infrastructure/docker/postgres/data/
+
+# --- Claude Code session-local artifacts (launch.json itself is tracked) ---
+.claude/scheduled_tasks.lock

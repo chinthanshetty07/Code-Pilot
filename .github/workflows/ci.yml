@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    # Not containerizing this job (no `container:` directive) is
+    # deliberate: it runs straight on the runner's own OS, which already
+    # has a real Docker daemon available with no socket-mounting needed --
+    # unlike local dev, where the sandbox-runner tests run *inside* the
+    # `worker` container specifically because that's the one with the
+    # host's docker.sock mounted in (see docker-compose.yml). Here there's
+    # no "inside a container" to begin with, so the same tests
+    # (test_sandbox.py, and the real-git-push tests in
+    # test_pull_requests.py/test_workspace.py) work without that
+    # indirection.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: codepilot
+          POSTGRES_PASSWORD: codepilot
+          POSTGRES_DB: codepilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codepilot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://codepilot:codepilot@localhost:5432/codepilot
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-test-secret-not-for-real-use
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Mypy
+        run: uv run mypy app
+
+      - name: Pytest
+        run: uv run pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No explicit version -- reads it from package.json's own
+      # "packageManager" field, so this can't drift out of sync with what
+      # local dev actually uses.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm --filter web lint
+
+      - name: Type check
+        run: pnpm --filter web exec tsc --noEmit
+
+      - name: Unit tests
+        run: pnpm --filter web test
+
+      - name: Build
+        run: pnpm --filter web build

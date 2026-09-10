@@ -12,6 +12,12 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import type { ConnectedRepository, Issue } from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
+import { formatAbsoluteTime, formatRelativeTime, truncate } from "@/lib/format";
+import {
+  isPendingPlanningStatus,
+  isRepositoryIndexed,
+  notIndexedMessage,
+} from "@/lib/status";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
 // How often to re-fetch the issues list while one is queued/planning. Same
@@ -25,82 +31,6 @@ const POLL_INTERVAL_MS = 2500;
 const MAX_DESCRIPTION_LENGTH = 5000;
 
 const MAX_ROW_TEXT_LENGTH = 220;
-
-function truncate(text: string, maxLength: number): string {
-  if (text.length <= maxLength) {
-    return text;
-  }
-  return `${text.slice(0, maxLength - 1)}…`;
-}
-
-// Small relative-time formatter built on the native `Intl` API. Copied
-// verbatim from repositories/page.tsx -- see that file for why the locale
-// is pinned (not the runtime default): this page is SSR'd on first load
-// like any client component, and an unpinned locale renders differently on
-// the server than in the browser, producing a hydration mismatch.
-function formatRelativeTime(iso: string): string {
-  const diffSeconds = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
-  const divisions: [Intl.RelativeTimeFormatUnit, number][] = [
-    ["year", 60 * 60 * 24 * 365],
-    ["month", 60 * 60 * 24 * 30],
-    ["week", 60 * 60 * 24 * 7],
-    ["day", 60 * 60 * 24],
-    ["hour", 60 * 60],
-    ["minute", 60],
-  ];
-  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  for (const [unit, secondsInUnit] of divisions) {
-    if (Math.abs(diffSeconds) >= secondsInUnit) {
-      return rtf.format(Math.round(diffSeconds / secondsInUnit), unit);
-    }
-  }
-  return rtf.format(diffSeconds, "second");
-}
-
-// Absolute-time label for the `title` tooltip. Locale and time zone are both
-// pinned for the same reason as `formatRelativeTime` above. Copied verbatim
-// from repositories/page.tsx.
-function formatAbsoluteTime(iso: string): string {
-  const formatted = new Date(iso).toLocaleString("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "UTC",
-  });
-  return `${formatted} UTC`;
-}
-
-// A repository is ready for planning once it has actually finished indexing
-// and produced chunks -- the Planner agent's `search_code` tool needs
-// chunks to search, exactly like a manual search does. Same condition
-// (`isSearchable`) and same copy (`notSearchableMessage`) as
-// repositories/[id]/search/page.tsx, kept verbatim on purpose: a user
-// bouncing between Search and Issues on a not-yet-indexed repo should see
-// an identical message, not a differently-worded one that happens to mean
-// the same thing.
-function isPlannable(repo: ConnectedRepository): boolean {
-  return repo.indexing_status === "indexed" && repo.chunk_count > 0;
-}
-
-function notPlannableMessage(repo: ConnectedRepository): string {
-  switch (repo.indexing_status) {
-    case "queued":
-    case "indexing":
-      return "This repository is still being indexed — check back in a bit.";
-    case "failed":
-      return "Indexing failed for this repository, so there's nothing to search yet.";
-    default:
-      return "This repository hasn't been indexed yet.";
-  }
-}
-
-// Statuses that mean "the worker is on it" -- while an issue is in one of
-// these, the page keeps polling for updates. Same convention as
-// `PENDING_INDEXING_STATUSES` in repositories/page.tsx.
-const PENDING_PLANNING_STATUSES = new Set(["queued", "planning"]);
-
-function isPendingPlanningStatus(status: string): boolean {
-  return PENDING_PLANNING_STATUSES.has(status);
-}
 
 // Dot color + label per `planning_status`, same convention as
 // repositories/page.tsx's `STATUS_DOT_CLASS`/`IndexingStatus`: amber while
@@ -428,10 +358,10 @@ export default function IssuesPage() {
               </button>
             )}
           </div>
-        ) : repo && !isPlannable(repo) ? (
+        ) : repo && !isRepositoryIndexed(repo) ? (
           <div className="flex flex-col gap-2">
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
-              {notPlannableMessage(repo)}
+              {notIndexedMessage(repo)}
             </p>
             <Link
               href="/repositories"

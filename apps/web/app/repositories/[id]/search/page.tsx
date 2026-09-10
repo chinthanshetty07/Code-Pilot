@@ -12,6 +12,7 @@ import { useParams, usePathname, useRouter, useSearchParams } from "next/navigat
 import Link from "next/link";
 import type { ConnectedRepository, SearchResult } from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
+import { isRepositoryIndexed, notIndexedMessage } from "@/lib/status";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
 // Matches the backend's own default (see `search_code` in
@@ -25,26 +26,6 @@ function Badge({ children }: { children: string }) {
       {children}
     </span>
   );
-}
-
-// A repository is searchable once it has actually finished indexing and
-// produced chunks. Mirrors `isRepoSearchable` on the repositories list page,
-// which uses the identical check to enable/disable the "Search" button that
-// links here.
-function isSearchable(repo: ConnectedRepository): boolean {
-  return repo.indexing_status === "indexed" && repo.chunk_count > 0;
-}
-
-function notSearchableMessage(repo: ConnectedRepository): string {
-  switch (repo.indexing_status) {
-    case "queued":
-    case "indexing":
-      return "This repository is still being indexed — check back in a bit.";
-    case "failed":
-      return "Indexing failed for this repository, so there's nothing to search yet.";
-    default:
-      return "This repository hasn't been indexed yet.";
-  }
 }
 
 // Simple bar + percentage -- deliberately not a fancier gauge, per the
@@ -240,7 +221,7 @@ function SearchPageContent() {
   const initialQuery = useRef(searchParams.get("q"));
   const hasAutoSearched = useRef(false);
   useEffect(() => {
-    if (hasAutoSearched.current || !repo || !isSearchable(repo)) {
+    if (hasAutoSearched.current || !repo || !isRepositoryIndexed(repo)) {
       return;
     }
     hasAutoSearched.current = true;
@@ -299,10 +280,10 @@ function SearchPageContent() {
               </button>
             )}
           </div>
-        ) : repo && !isSearchable(repo) ? (
+        ) : repo && !isRepositoryIndexed(repo) ? (
           <div className="flex flex-col gap-2">
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
-              {notSearchableMessage(repo)}
+              {notIndexedMessage(repo)}
             </p>
             <Link
               href="/repositories"

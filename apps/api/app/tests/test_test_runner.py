@@ -120,6 +120,7 @@ async def test_run_tests_passes_a_real_pytest_suite(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         await run_tests(db, db_test_run)
 
     reloaded = await _reload(test_run)
@@ -153,6 +154,7 @@ async def test_run_tests_reports_a_real_failing_suite(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         await run_tests(db, db_test_run)
 
     reloaded = await _reload(test_run)
@@ -186,6 +188,7 @@ async def test_run_tests_errors_when_no_test_command_detected(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         await run_tests(db, db_test_run)
 
     reloaded = await _reload(test_run)
@@ -215,6 +218,7 @@ async def test_run_tests_applies_the_stored_diff_before_running(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         db_test_run.code_change.diff = real_diff
         await run_tests(db, db_test_run)
 
@@ -243,6 +247,7 @@ async def test_run_tests_errors_when_the_diff_does_not_apply(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         db_test_run.code_change.diff = bogus_diff
         await run_tests(db, db_test_run)
 
@@ -294,6 +299,7 @@ async def test_run_tests_fixes_a_failing_suite_and_passes(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         await run_tests(db, db_test_run)
 
     fix_spy.assert_awaited_once()
@@ -328,6 +334,7 @@ async def test_run_tests_exhausts_fix_attempts_and_stays_failed(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         await run_tests(db, db_test_run)
 
     assert fix_spy.await_count == test_runner_module.MAX_FIX_ATTEMPTS
@@ -366,6 +373,7 @@ async def test_run_tests_does_not_attempt_a_fix_when_status_is_error(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         await run_tests(db, db_test_run)
 
     fix_spy.assert_not_awaited()
@@ -395,6 +403,7 @@ async def test_run_tests_stays_failed_when_a_fix_attempt_itself_raises(
             test_run.id,
             options=_TEST_RUN_LOAD_OPTIONS,
         )
+        assert db_test_run is not None
         await run_tests(db, db_test_run)
 
     reloaded = await _reload(test_run)

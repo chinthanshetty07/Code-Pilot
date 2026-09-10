@@ -1,0 +1,130 @@
+# Render Blueprint -- see DEPLOYMENT.md for the full walkthrough (account
+# setup, secrets, the GitHub OAuth callback URL update, and -- important --
+# a real limitation of this deployment target: the Milestone 7 sandboxed
+# test runner needs a Docker socket to spin up sibling containers, which
+# Render's worker service (like virtually every PaaS) does not expose. See
+# DEPLOYMENT.md's "Known limitation" section before assuming "Run tests"
+# will work here.
+#
+# Service URLs below are hardcoded to Render's own predictable
+# https://<service-name>.onrender.com pattern rather than using `fromService`
+# cross-references, deliberately -- this project's own settings (API_BASE_URL,
+# FRONTEND_URL, NEXT_PUBLIC_API_URL) need full scheme-prefixed URLs, and
+# NEXT_PUBLIC_API_URL specifically has to be known at Docker *build* time
+# (see apps/web/Dockerfile.prod's own comment), where a live cross-service
+# reference isn't available anyway. If you rename a service during Blueprint
+# setup, update the matching hardcoded URL(s) below to match.
+
+databases:
+  - name: codepilot-postgres
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+    # pgvector is enabled by the app's own migration chain (`CREATE
+    # EXTENSION IF NOT EXISTS vector`, added to the earliest migration that
+    # needs it), not anything Render-specific -- `alembic upgrade head`
+    # (see DEPLOYMENT.md's first-deploy steps) is enough on its own.
+
+services:
+  - name: codepilot-redis
+    type: keyvalue
+    plan: free
+    ipAllowList: [] # no external access -- only other Render services in this project reach it, over the private network
+    maxmemoryPolicy: noeviction # sessions/rate-limit counters/the arq job queue all live here -- evicting live data under memory pressure is worse than refusing new writes
+
+  - name: codepilot-api
+    type: web
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: ./apps/api
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: codepilot-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: codepilot-redis
+          type: keyvalue
+          property: connectionString
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: API_BASE_URL
+        value: https://codepilot-api.onrender.com
+      - key: FRONTEND_URL
+        value: https://codepilot-web.onrender.com
+      - key: CORS_ORIGINS
+        value: '["https://codepilot-web.onrender.com"]'
+      # Secrets below are declared here so Render creates the slot for
+      # them, but their real values are never committed -- `sync: false`
+      # prompts for each one during the *initial* Blueprint creation only
+      # (Render ignores sync: false entries on a Blueprint update, so a
+      # later value change has to happen directly in the dashboard, not by
+      # re-editing this file). The same six need entering again for
+      # codepilot-worker below -- Render Blueprints don't share env vars
+      # across services without a separate envVarGroups setup, which felt
+      # like more moving parts than six duplicate prompts was worth for a
+      # first deploy.
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: EMBEDDING_API_KEY
+        sync: false
+
+  - name: codepilot-worker
+    type: worker
+    runtime: docker
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: ./apps/api
+    # dockerCommand replaces the image's own CMD entirely (which runs
+    # migrations before uvicorn, see apps/api/Dockerfile) -- repeated here
+    # so the worker also runs migrations before it starts, since it's an
+    # equally valid first service to come up on a fresh deploy and
+    # shouldn't assume codepilot-api already got there first.
+    dockerCommand: sh -c "alembic upgrade head && arq app.workers.worker.WorkerSettings"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: codepilot-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: codepilot-redis
+          type: keyvalue
+          property: connectionString
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true # only used here for consistency with codepilot-api -- the worker doesn't currently sign/encrypt anything itself
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: EMBEDDING_API_KEY
+        sync: false
+
+  - name: codepilot-web
+    type: web
+    runtime: docker
+    dockerfilePath: ./apps/web/Dockerfile.prod
+    dockerContext: .
+    envVars:
+      # Runtime-only effect: Next.js's *build* is what actually needs this
+      # (see Dockerfile.prod), and Render doesn't offer a Blueprint-level
+      # way to pass a Docker --build-arg, so the Dockerfile's own ARG
+      # default already hardcodes this same URL. This entry just keeps the
+      # deployed container's runtime environment consistent with what got
+      # baked in -- if you ever change the API's URL, update both places.
+      - key: NEXT_PUBLIC_API_URL
+        value: https://codepilot-api.onrender.com

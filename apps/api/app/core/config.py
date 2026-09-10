@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,25 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://codepilot:codepilot@localhost:5433/codepilot"
     redis_url: str = "redis://localhost:6379/0"
+
+    @field_validator("database_url")
+    @classmethod
+    def _normalize_database_url(cls, value: str) -> str:
+        """A managed Postgres provider's own connection string (e.g.
+        Render's `fromDatabase: {property: connectionString}`, see
+        DEPLOYMENT.md) is a bare `postgresql://` or `postgres://` URL --
+        confirmed empirically that `create_async_engine` on one of those
+        fails immediately with `ModuleNotFoundError: No module named
+        'psycopg2'` (it defaults to the sync driver, which this project
+        doesn't even install; it uses `+psycopg`, the async-capable v3
+        driver). Rewriting the scheme here means any bare connection
+        string just works, rather than needing every deployment target to
+        remember to hand-append `+psycopg` themselves."""
+        if value.startswith("postgresql://"):
+            return "postgresql+psycopg://" + value.removeprefix("postgresql://")
+        if value.startswith("postgres://"):
+            return "postgresql+psycopg://" + value.removeprefix("postgres://")
+        return value
 
     github_client_id: str = ""
     github_client_secret: str = ""

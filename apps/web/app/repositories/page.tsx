@@ -8,6 +8,8 @@ import type {
   GithubRepoSummary,
 } from "@codepilot/shared-types";
 import { apiFetch, ApiError } from "@/lib/api";
+import { formatAbsoluteTime, formatRelativeTime, truncate } from "@/lib/format";
+import { isPendingIndexingStatus, isRepositoryIndexed } from "@/lib/status";
 import { useCurrentUser } from "@/hooks/use-current-user";
 
 function logout(): Promise<void> {
@@ -54,21 +56,6 @@ function RepoMeta({
   );
 }
 
-// Statuses that mean "the worker is on it" — while a repo is in one of
-// these, its Index button is disabled and the page polls for updates.
-const PENDING_INDEXING_STATUSES = new Set(["queued", "indexing"]);
-
-function isPendingIndexingStatus(status: string): boolean {
-  return PENDING_INDEXING_STATUSES.has(status);
-}
-
-// A repository is searchable once it has actually finished indexing and
-// produced chunks -- mirrors the identical check on the search page itself
-// (`isSearchable` in repositories/[id]/search/page.tsx).
-function isRepoSearchable(repo: ConnectedRepository): boolean {
-  return repo.indexing_status === "indexed" && repo.chunk_count > 0;
-}
-
 // Dot color per status, same convention as `HealthBadge`'s
 // `STATE_DOT_CLASS`: amber while waiting, pulsing amber while active,
 // emerald on success, red on failure. `not_indexed` has no entry — it
@@ -82,55 +69,7 @@ const STATUS_DOT_CLASS: Record<string, string> = {
 
 const MAX_INDEXING_ERROR_LENGTH = 140;
 
-function truncate(text: string, maxLength: number): string {
-  if (text.length <= maxLength) {
-    return text;
-  }
-  return `${text.slice(0, maxLength - 1)}…`;
-}
-
-// Small relative-time formatter built on the native `Intl` API — no new
-// date library needed for a "3 hours ago"-style label. Locale is pinned
-// (not the runtime default) so this page — SSR'd on first load like any
-// client component — renders identically on the server and the browser;
-// the two `Date.now()` calls can still differ by the render/hydration gap,
-// which is rendered with `suppressHydrationWarning` at the call site.
-function formatRelativeTime(iso: string): string {
-  const diffSeconds = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
-  const divisions: [Intl.RelativeTimeFormatUnit, number][] = [
-    ["year", 60 * 60 * 24 * 365],
-    ["month", 60 * 60 * 24 * 30],
-    ["week", 60 * 60 * 24 * 7],
-    ["day", 60 * 60 * 24],
-    ["hour", 60 * 60],
-    ["minute", 60],
-  ];
-  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  for (const [unit, secondsInUnit] of divisions) {
-    if (Math.abs(diffSeconds) >= secondsInUnit) {
-      return rtf.format(Math.round(diffSeconds / secondsInUnit), unit);
-    }
-  }
-  return rtf.format(diffSeconds, "second");
-}
-
-// Absolute-time label for the `title` tooltip. Locale and time zone are
-// both pinned (rather than left to the runtime default) for the same
-// reason as `formatRelativeTime` — `toLocaleString()` with no arguments
-// resolves its default locale differently on the Node server than in the
-// browser, which produces a real hydration mismatch (confirmed while
-// eyeballing this page: the server rendered "09/09/2026, 12:24:20" and
-// the client rendered "9/9/2026, 12:24:20 PM" for the same instant).
-function formatAbsoluteTime(iso: string): string {
-  const formatted = new Date(iso).toLocaleString("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "UTC",
-  });
-  return `${formatted} UTC`;
-}
-
-function indexButtonLabel(status: string, isRequesting: boolean): string {
+export function indexButtonLabel(status: string, isRequesting: boolean): string {
   if (isRequesting) {
     return "Starting…";
   }
@@ -529,7 +468,7 @@ export default function RepositoriesPage() {
                       </button>
                       <button
                         type="button"
-                        disabled={!isRepoSearchable(repo)}
+                        disabled={!isRepositoryIndexed(repo)}
                         onClick={() => router.push(`/repositories/${repo.id}/search`)}
                         className="shrink-0 rounded-md border border-black/[.08] px-3 py-1.5 text-sm font-medium text-zinc-950 transition-colors hover:bg-black/[.04] disabled:cursor-default disabled:opacity-50 dark:border-white/[.145] dark:text-zinc-50 dark:hover:bg-white/[.06]"
                       >
@@ -537,7 +476,7 @@ export default function RepositoriesPage() {
                       </button>
                       <button
                         type="button"
-                        disabled={!isRepoSearchable(repo)}
+                        disabled={!isRepositoryIndexed(repo)}
                         onClick={() => router.push(`/repositories/${repo.id}/issues`)}
                         className="shrink-0 rounded-md border border-black/[.08] px-3 py-1.5 text-sm font-medium text-zinc-950 transition-colors hover:bg-black/[.04] disabled:cursor-default disabled:opacity-50 dark:border-white/[.145] dark:text-zinc-50 dark:hover:bg-white/[.06]"
                       >

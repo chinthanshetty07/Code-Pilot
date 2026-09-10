@@ -1,14 +1,26 @@
+import asyncio
 import json
+import random
 import uuid
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from groq import AsyncGroq
 from groq import BadRequestError as GroqBadRequestError
+from groq import RateLimitError as GroqRateLimitError
 
 from app.core.config import get_settings
+
+# Mirrors app/rag/embeddings.py's own retry constants/backoff formula --
+# same reasoning applies here: Groq/Gemini's free tiers are rate- not
+# token-limited, and a 429 mid-turn shouldn't hard-fail an entire
+# plan/code-change/review run (the outer agent loops only catch generic
+# Exception, which would otherwise discard every turn made so far).
+_MAX_RETRIES = 5
+_RETRY_BASE_DELAY_SECONDS = 1.0
 
 
 @dataclass
@@ -156,41 +168,56 @@ class GroqLLMProvider:
         if force_tool:
             extra_kwargs["tool_choice"] = {"type": "function", "function": {"name": force_tool}}
 
-        try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=self._to_api_messages(messages, system),
-                **extra_kwargs,
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    # _to_api_messages hand-builds plain dicts matching the wire
+                    # format; the stub wants each entry typed as one of its exact
+                    # ChatCompletion*MessageParam TypedDicts, which plain dicts
+                    # don't structurally satisfy even though the shape is right.
+                    messages=self._to_api_messages(messages, system),  # type: ignore[arg-type]
+                    **extra_kwargs,
+                )
+            except GroqBadRequestError as exc:
+                # Observed in practice: gpt-oss-120b occasionally hallucinates
+                # tool arguments that don't match the declared schema (e.g. a
+                # made-up `path`/`depth` for search_code, which only takes
+                # `query`). Groq validates client-side and rejects the whole
+                # request with a 400 rather than returning a normal response for
+                # the caller to inspect -- so there's no tool_calls to recover
+                # from here. Surfacing it as if the model had answered in plain
+                # text (no tool_calls) lets the existing "nudge it back on
+                # track" loop in the caller retry, instead of this hard-failing
+                # the entire plan over one bad tool call.
+                return LLMResponse(
+                    content=f"(tool call rejected: {exc})",
+                    tool_calls=[],
+                )
+            except GroqRateLimitError:
+                if attempt == _MAX_RETRIES - 1:
+                    raise
+                delay = _RETRY_BASE_DELAY_SECONDS * (2**attempt) + random.random()
+                await asyncio.sleep(delay)
+                continue
+
+            msg = response.choices[0].message
+            tool_calls = [
+                ToolCall(
+                    id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments)
+                )
+                for tc in (msg.tool_calls or [])
+            ]
+            usage = (
+                TokenUsage(
+                    input_tokens=response.usage.prompt_tokens,
+                    output_tokens=response.usage.completion_tokens,
+                )
+                if response.usage is not None
+                else None
             )
-        except GroqBadRequestError as exc:
-            # Observed in practice: gpt-oss-120b occasionally hallucinates
-            # tool arguments that don't match the declared schema (e.g. a
-            # made-up `path`/`depth` for search_code, which only takes
-            # `query`). Groq validates client-side and rejects the whole
-            # request with a 400 rather than returning a normal response for
-            # the caller to inspect -- so there's no tool_calls to recover
-            # from here. Surfacing it as if the model had answered in plain
-            # text (no tool_calls) lets the existing "nudge it back on
-            # track" loop in the caller retry, instead of this hard-failing
-            # the entire plan over one bad tool call.
-            return LLMResponse(
-                content=f"(tool call rejected: {exc})",
-                tool_calls=[],
-            )
-        msg = response.choices[0].message
-        tool_calls = [
-            ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments))
-            for tc in (msg.tool_calls or [])
-        ]
-        usage = (
-            TokenUsage(
-                input_tokens=response.usage.prompt_tokens,
-                output_tokens=response.usage.completion_tokens,
-            )
-            if response.usage is not None
-            else None
-        )
-        return LLMResponse(content=msg.content, tool_calls=tool_calls, usage=usage)
+            return LLMResponse(content=msg.content, tool_calls=tool_calls, usage=usage)
+        raise AssertionError("unreachable")  # loop always returns or raises
 
 
 class GeminiLLMProvider:
@@ -269,31 +296,59 @@ class GeminiLLMProvider:
         tool_config = (
             genai_types.ToolConfig(
                 function_calling_config=genai_types.FunctionCallingConfig(
-                    mode="ANY", allowed_function_names=[force_tool]
+                    # FunctionCallingConfigMode is a `(str, Enum)` subclass,
+                    # so the plain string is coerced to the enum member at
+                    # validation time; the stub just wants the enum itself.
+                    mode="ANY",  # type: ignore[arg-type]
+                    allowed_function_names=[force_tool],
                 )
             )
             if force_tool
             else None
         )
 
-        response = await self._client.aio.models.generate_content(
-            model=self._model,
-            contents=self._to_contents(messages),
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system,
-                tools=genai_tools,
-                tool_config=tool_config,
-                # Handled by this codebase's own agent loop uniformly across
-                # providers, rather than relying on Gemini-specific
-                # auto-execution that Groq has no equivalent for.
-                automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = await self._client.aio.models.generate_content(
+                    model=self._model,
+                    contents=self._to_contents(messages),
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=system,
+                        # genai_tools is `list[Tool] | None`; the stub's `tools`
+                        # param is `Optional[list[Tool | Callable | McpTool |
+                        # McpSession]]`, and list is invariant, so `list[Tool]`
+                        # doesn't structurally satisfy the wider list type even
+                        # though every element does.
+                        tools=genai_tools,  # type: ignore[arg-type]
+                        tool_config=tool_config,
+                        # Handled by this codebase's own agent loop uniformly
+                        # across providers, rather than relying on
+                        # Gemini-specific auto-execution that Groq has no
+                        # equivalent for.
+                        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        ),
+                    ),
+                )
+                break
+            except genai_errors.APIError as exc:
+                # Mirrors app/rag/embeddings.py's own retry-on-429 handling.
+                if exc.code != 429 or attempt == _MAX_RETRIES - 1:
+                    raise
+                delay = _RETRY_BASE_DELAY_SECONDS * (2**attempt) + random.random()
+                await asyncio.sleep(delay)
+        else:
+            raise AssertionError("unreachable")  # loop always breaks or raises
 
-        candidate = response.candidates[0]
+        # candidates/content/parts are typed Optional by the stub (the SDK's
+        # own internal response.text helper guards them the same way, for
+        # the content-blocked/no-candidates case documented on
+        # GenerateContentResponse.prompt_feedback) -- this call site assumes
+        # a normal, non-blocked response, matching its existing behavior.
+        candidate = response.candidates[0]  # type: ignore[index]
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
-        for part in candidate.content.parts:
+        for part in candidate.content.parts:  # type: ignore[union-attr]
             if part.function_call:
                 tool_calls.append(
                     ToolCall(

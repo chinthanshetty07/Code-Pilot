@@ -86,7 +86,13 @@ class GeminiEmbeddingProvider:
                     response = await self._client.aio.models.embed_content(
                         model=self._model, contents=text, config=config
                     )
-                    return response.embeddings[0].values
+                    # The SDK types `embeddings` as Optional, but a successful
+                    # embed_content call always populates it with exactly one
+                    # entry (we pass a single `contents` string, not a batch).
+                    assert response.embeddings is not None
+                    values = response.embeddings[0].values
+                    assert values is not None
+                    return values
                 except genai_errors.APIError as exc:
                     if exc.code != 429 or attempt == _MAX_RETRIES - 1:
                         raise

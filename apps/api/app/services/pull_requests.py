@@ -39,10 +39,11 @@ def _slugify(text: str, max_chars: int) -> str:
 
 def _branch_name_for_issue(issue) -> str:
     """Deterministic from issue.id -- computed fresh on every attempt
-    (never persisted-then-trusted) so a retry after a failed push targets
-    the exact same branch name rather than accumulating an abandoned one
-    per attempt. Re-pushing the same (fast-forward) commit to a branch
-    that already exists from a previous attempt is harmless."""
+    (never persisted-then-trusted) so a retry targets the exact same
+    branch name rather than accumulating an abandoned one per attempt.
+    Retrying that same branch name is safe even though each attempt's
+    local commit is a genuinely different object (see Workspace.push_branch's
+    own comment on why it force-pushes)."""
     slug = _slugify(issue.description, BRANCH_SLUG_MAX_CHARS) or "change"
     return f"codepilot/{slug}-{issue.id.hex[:8]}"
 

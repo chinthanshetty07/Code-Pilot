@@ -1,0 +1,44 @@
+# Production build -- unlike the dev Dockerfile (Dockerfile, CMD ["pnpm",
+# "dev"], meant for docker-compose.yml's bind-mounted hot-reload setup),
+# this actually builds the app and serves the built output. Build context
+# is the monorepo root (not apps/web), same reason as the dev Dockerfile:
+# pnpm needs to resolve the @codepilot/shared-types workspace dependency.
+#
+# IMPORTANT (see DEPLOYMENT.md): NEXT_PUBLIC_API_URL is inlined into the
+# client-side JS bundle at `next build` time, not read at container
+# startup -- unlike the dev setup, where docker-compose.yml's `environment:`
+# works because `next dev` re-reads it live. That means the real, final API
+# URL must be passed as a build arg (--build-arg NEXT_PUBLIC_API_URL=...)
+# when this image is built, not just set as a runtime environment variable
+# on the deployed container -- setting it only at runtime silently bakes in
+# whatever (or nothing) was available at build time instead, and is a
+# common enough Next.js/Docker mistake that it's worth this much emphasis.
+FROM node:24-slim AS base
+WORKDIR /repo
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+FROM base AS build
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY apps/web/package.json apps/web/package.json
+COPY packages/shared-types/package.json packages/shared-types/package.json
+RUN pnpm install --frozen-lockfile
+
+COPY apps/web apps/web
+COPY packages/shared-types packages/shared-types
+
+WORKDIR /repo/apps/web
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+RUN pnpm build
+
+FROM base AS runner
+ENV NODE_ENV=production
+# Copied wholesale rather than cherry-picking node_modules subpaths -- pnpm's
+# workspace symlink layout is easy to get subtly wrong by hand, and image
+# size isn't the priority here (see next.config.ts's own comment on
+# `output: "standalone"` as a future optimization if it ever becomes one).
+COPY --from=build /repo /repo
+
+WORKDIR /repo/apps/web
+EXPOSE 3000
+CMD ["pnpm", "start"]

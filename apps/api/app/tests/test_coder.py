@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 from app.agents import coder as coder_module
 from app.agents.coder import FORCE_FINISH_ATTEMPTS, MAX_TURNS, create_code_change, fix_code_change
 from app.core.db import async_session_factory
-from app.llm.provider import LLMResponse, TokenUsage, ToolCall
+from app.llm.provider import LLMResponse, TokenUsage, ToolCall, ToolSpec
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
 from app.models.plan import Plan
@@ -238,7 +238,7 @@ async def test_create_code_change_forces_finish_after_free_choice_exhausted(
     async def keeps_reading_unless_forced(
         _messages: object,
         *,
-        tools: tuple[object, ...] = (),
+        tools: tuple[ToolSpec, ...] = (),
         force_tool: str | None = None,
         **_kwargs: object,
     ) -> LLMResponse:

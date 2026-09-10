@@ -150,6 +150,19 @@ class Workspace:
         `HEAD:refs/heads/<branch_name>` creates the remote branch directly,
         without needing a separate local `checkout -b` first.
 
+        --force is deliberate, not a shortcut: create_workspace's initial
+        commit has no pinned timestamp, so a retry after a prior *push*
+        succeeded but the follow-up "open the PR" API call failed builds a
+        genuinely unrelated local history (different commit hash) for what
+        may well be the same diff -- a plain push would be rejected as
+        non-fast-forward, permanently stuck retrying the exact same way
+        forever. Safe here specifically because the only caller
+        (create_pull_request) only ever runs while pull_request.status is
+        "queued" -- app/api/issues.py's create_pull_request route hard-blocks
+        ever reaching this once status is "created", so this branch can
+        never carry human-authored commits (from someone pushing follow-up
+        changes to an already-open PR) that a force-push could discard.
+
         Deliberately does not forward _run_git's own WorkspaceError message
         on failure: that message embeds the full argv it ran, which here
         would include remote_url and therefore the access token -- exactly
@@ -159,7 +172,7 @@ class Workspace:
         user-facing.
         """
         try:
-            await self._run_git("push", remote_url, f"HEAD:refs/heads/{branch_name}")
+            await self._run_git("push", "--force", remote_url, f"HEAD:refs/heads/{branch_name}")
         except WorkspaceError:
             raise WorkspaceError(
                 f"git push to the remote failed (branch {branch_name!r}) -- check that "

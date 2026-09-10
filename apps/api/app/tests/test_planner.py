@@ -8,7 +8,7 @@ from sqlalchemy import delete, select
 from app.agents import planner as planner_module
 from app.agents.planner import FORCE_SUBMIT_ATTEMPTS, MAX_TURNS, create_plan
 from app.core.db import async_session_factory
-from app.llm.provider import LLMResponse, TokenUsage, ToolCall
+from app.llm.provider import LLMResponse, TokenUsage, ToolCall, ToolSpec
 from app.models.issue import Issue
 from app.models.plan import Plan
 from app.models.repository import Repository
@@ -83,6 +83,7 @@ async def test_create_plan_submits_directly(monkeypatch: pytest.MonkeyPatch, iss
 
     async with async_session_factory() as db:
         db_issue = await db.get(Issue, issue.id)
+        assert db_issue is not None
         await create_plan(db, db_issue)
 
     reloaded = await _reload(issue)
@@ -112,6 +113,7 @@ async def test_create_plan_executes_search_code_before_submitting(
 
     async with async_session_factory() as db:
         db_issue = await db.get(Issue, issue.id)
+        assert db_issue is not None
         await create_plan(db, db_issue)
 
     fake_search.assert_awaited_once()
@@ -141,6 +143,7 @@ async def test_create_plan_handles_malformed_submit_plan_arguments(
 
     async with async_session_factory() as db:
         db_issue = await db.get(Issue, issue.id)
+        assert db_issue is not None
         await create_plan(db, db_issue)
 
     reloaded = await _reload(issue)
@@ -161,6 +164,7 @@ async def test_create_plan_fails_after_max_turns_without_submit(
 
     async with async_session_factory() as db:
         db_issue = await db.get(Issue, issue.id)
+        assert db_issue is not None
         await create_plan(db, db_issue)
 
     assert fake_provider.complete.await_count == MAX_TURNS + FORCE_SUBMIT_ATTEMPTS
@@ -182,7 +186,7 @@ async def test_create_plan_forces_submission_after_free_choice_exhausted(
     async def keeps_searching_unless_forced(
         _messages: object,
         *,
-        tools: tuple[object, ...] = (),
+        tools: tuple[ToolSpec, ...] = (),
         force_tool: str | None = None,
         **_kwargs: object,
     ) -> LLMResponse:
@@ -201,6 +205,7 @@ async def test_create_plan_forces_submission_after_free_choice_exhausted(
 
     async with async_session_factory() as db:
         db_issue = await db.get(Issue, issue.id)
+        assert db_issue is not None
         await create_plan(db, db_issue)
 
     # MAX_TURNS free-choice turns (always search_code, never forced) plus
@@ -243,6 +248,7 @@ async def test_create_plan_retries_a_forced_attempt_that_fails(
 
     async with async_session_factory() as db:
         db_issue = await db.get(Issue, issue.id)
+        assert db_issue is not None
         await create_plan(db, db_issue)
 
     assert fake_provider.complete.await_count == MAX_TURNS + 2
@@ -270,6 +276,7 @@ async def test_create_plan_records_token_usage(
 
     async with async_session_factory() as db:
         db_issue = await db.get(Issue, issue.id)
+        assert db_issue is not None
         await create_plan(db, db_issue)
 
     async with async_session_factory() as db:

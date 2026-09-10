@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +34,9 @@ _ISSUE_LOAD_OPTIONS = (
 )
 
 
-async def _get_owned_repository(db: AsyncSession, repository_id: str, user: User) -> Repository:
+async def _get_owned_repository(
+    db: AsyncSession, repository_id: uuid.UUID, user: User
+) -> Repository:
     repository = await db.get(Repository, repository_id)
     if repository is None or repository.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
@@ -40,9 +44,24 @@ async def _get_owned_repository(db: AsyncSession, repository_id: str, user: User
 
 
 async def _get_owned_issue(
-    db: AsyncSession, repository_id: str, issue_id: str, user: User
+    db: AsyncSession,
+    repository_id: uuid.UUID,
+    issue_id: uuid.UUID,
+    user: User,
+    *,
+    for_update: bool = False,
 ) -> Issue:
-    result = await db.execute(
+    # for_update=True locks the Issue row for the rest of this transaction --
+    # used by every endpoint that reads a status field, decides whether a
+    # stage is already in progress, and then writes a new status, so two
+    # concurrent requests (a double-click, or a retried HTTP call) serialize
+    # instead of both reading "not in progress" and both proceeding. The
+    # second request re-reads (and sees the first request's now-committed
+    # write) only once it acquires the lock, so its own guard check is
+    # evaluated against current data, not stale data read before the race.
+    # `of=Issue` scopes the lock to the Issue row itself, not the joined
+    # Repository row, which nothing here needs to lock.
+    query = (
         select(Issue)
         .options(*_ISSUE_LOAD_OPTIONS)
         .join(Repository, Issue.repository_id == Repository.id)
@@ -52,6 +71,9 @@ async def _get_owned_issue(
             Repository.owner_id == user.id,
         )
     )
+    if for_update:
+        query = query.with_for_update(of=Issue)
+    result = await db.execute(query)
     issue = result.scalar_one_or_none()
     if issue is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Issue not found")
@@ -64,7 +86,7 @@ async def _get_owned_issue(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_issue(
-    repository_id: str,
+    repository_id: uuid.UUID,
     payload: IssueCreateIn,
     request: Request,
     user: User = Depends(get_current_user),
@@ -95,7 +117,7 @@ async def create_issue(
 
 @router.get("/api/repositories/{repository_id}/issues", response_model=list[IssueOut])
 async def list_issues(
-    repository_id: str,
+    repository_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[Issue]:
@@ -112,8 +134,8 @@ async def list_issues(
 
 @router.get("/api/repositories/{repository_id}/issues/{issue_id}", response_model=IssueOut)
 async def get_issue(
-    repository_id: str,
-    issue_id: str,
+    repository_id: uuid.UUID,
+    issue_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Issue:
@@ -126,15 +148,15 @@ async def get_issue(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_code_change(
-    repository_id: str,
-    issue_id: str,
+    repository_id: uuid.UUID,
+    issue_id: uuid.UUID,
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Issue:
     await rate_limit(request, key="create_code_change", limit=10, window_seconds=60)
 
-    issue = await _get_owned_issue(db, repository_id, issue_id, user)
+    issue = await _get_owned_issue(db, repository_id, issue_id, user, for_update=True)
 
     if issue.planning_status != "planned":
         raise HTTPException(
@@ -217,6 +239,16 @@ async def create_code_change(
         code_change.pull_request = None
     await db.commit()
     await db.refresh(issue, attribute_names=["plan", "code_change"])
+    # Without this, a *first-time* generation crashes response serialization:
+    # a brand new CodeChange's test_run/review/pull_request were never
+    # selectinload'ed (there was no code_change row to load them onto before
+    # this request), so IssueOut's pydantic serialization -- which runs
+    # outside an awaited context -- trips SQLAlchemy's async-unsafe lazy
+    # load (MissingGreenlet) trying to read them. The regenerate branch
+    # above happens to dodge this by setting all three to None in memory
+    # before commit, but doing it unconditionally here is simpler than
+    # relying on that as the only path that's safe.
+    await db.refresh(issue.code_change, attribute_names=["test_run", "review", "pull_request"])
 
     pool = await get_arq_pool()
     await pool.enqueue_job("create_code_change_task", str(code_change.id))
@@ -230,15 +262,15 @@ async def create_code_change(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_test_run(
-    repository_id: str,
-    issue_id: str,
+    repository_id: uuid.UUID,
+    issue_id: uuid.UUID,
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Issue:
     await rate_limit(request, key="create_test_run", limit=10, window_seconds=60)
 
-    issue = await _get_owned_issue(db, repository_id, issue_id, user)
+    issue = await _get_owned_issue(db, repository_id, issue_id, user, for_update=True)
 
     if issue.code_change is None or issue.code_change.generation_status != "generated":
         raise HTTPException(
@@ -279,15 +311,15 @@ async def create_test_run(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_review(
-    repository_id: str,
-    issue_id: str,
+    repository_id: uuid.UUID,
+    issue_id: uuid.UUID,
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Issue:
     await rate_limit(request, key="create_review", limit=10, window_seconds=60)
 
-    issue = await _get_owned_issue(db, repository_id, issue_id, user)
+    issue = await _get_owned_issue(db, repository_id, issue_id, user, for_update=True)
 
     code_change = issue.code_change
     test_run = code_change.test_run if code_change is not None else None
@@ -330,15 +362,15 @@ async def create_review(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_pull_request(
-    repository_id: str,
-    issue_id: str,
+    repository_id: uuid.UUID,
+    issue_id: uuid.UUID,
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Issue:
     await rate_limit(request, key="create_pull_request", limit=10, window_seconds=60)
 
-    issue = await _get_owned_issue(db, repository_id, issue_id, user)
+    issue = await _get_owned_issue(db, repository_id, issue_id, user, for_update=True)
 
     code_change = issue.code_change
     test_run = code_change.test_run if code_change is not None else None
@@ -396,8 +428,8 @@ async def create_pull_request(
     "/api/repositories/{repository_id}/issues/{issue_id}/usage", response_model=UsageSummaryOut
 )
 async def get_issue_usage(
-    repository_id: str,
-    issue_id: str,
+    repository_id: uuid.UUID,
+    issue_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> UsageSummary:

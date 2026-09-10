@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 from app.agents import reviewer as reviewer_module
 from app.agents.reviewer import FORCE_SUBMIT_ATTEMPTS, MAX_TURNS, create_review
 from app.core.db import async_session_factory
-from app.llm.provider import LLMResponse, TokenUsage, ToolCall
+from app.llm.provider import LLMResponse, TokenUsage, ToolCall, ToolSpec
 from app.models.code_change import CodeChange
 from app.models.issue import Issue
 from app.models.plan import Plan
@@ -180,6 +180,7 @@ async def test_create_review_approves_clean_code(
                 selectinload(Review.code_change).selectinload(CodeChange.test_run),
             ],
         )
+        assert db_review is not None
         await create_review(db, db_review)
 
     reloaded = await _reload(review)
@@ -227,6 +228,7 @@ async def test_create_review_requests_changes_with_comments(
                 selectinload(Review.code_change).selectinload(CodeChange.test_run),
             ],
         )
+        assert db_review is not None
         await create_review(db, db_review)
 
     reloaded = await _reload(review)
@@ -272,6 +274,7 @@ async def test_create_review_uses_read_file_and_search_code_first(
                 selectinload(Review.code_change).selectinload(CodeChange.test_run),
             ],
         )
+        assert db_review is not None
         await create_review(db, db_review)
 
     second_call_messages = fake_provider.complete.call_args_list[1].args[0]
@@ -310,6 +313,7 @@ async def test_create_review_recovers_from_a_bad_read_file(
                 selectinload(Review.code_change).selectinload(CodeChange.test_run),
             ],
         )
+        assert db_review is not None
         await create_review(db, db_review)
 
     second_call_messages = fake_provider.complete.call_args_list[1].args[0]
@@ -329,7 +333,7 @@ async def test_create_review_forces_submit_after_free_choice_exhausted(
     async def keeps_reading_unless_forced(
         _messages: object,
         *,
-        tools: tuple[object, ...] = (),
+        tools: tuple[ToolSpec, ...] = (),
         force_tool: str | None = None,
         **_kwargs: object,
     ) -> LLMResponse:
@@ -356,6 +360,7 @@ async def test_create_review_forces_submit_after_free_choice_exhausted(
                 selectinload(Review.code_change).selectinload(CodeChange.test_run),
             ],
         )
+        assert db_review is not None
         await create_review(db, db_review)
 
     assert fake_provider.complete.await_count == MAX_TURNS + 1
@@ -386,6 +391,7 @@ async def test_create_review_fails_after_exhausting_all_attempts(
                 selectinload(Review.code_change).selectinload(CodeChange.test_run),
             ],
         )
+        assert db_review is not None
         await create_review(db, db_review)
 
     assert fake_provider.complete.await_count == MAX_TURNS + FORCE_SUBMIT_ATTEMPTS
@@ -426,6 +432,7 @@ async def test_create_review_records_token_usage(
                 selectinload(Review.code_change).selectinload(CodeChange.test_run),
             ],
         )
+        assert db_review is not None
         await create_review(db, db_review)
 
     async with async_session_factory() as db:

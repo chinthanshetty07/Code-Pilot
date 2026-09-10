@@ -195,6 +195,7 @@ async def test_create_pull_request_pushes_a_real_branch_and_opens_a_pr(
 
         async with async_session_factory() as db:
             db_pr = await db.get(PullRequest, pull_request.id, options=_PULL_REQUEST_LOAD_OPTIONS)
+            assert db_pr is not None
             await create_pull_request(db, db_pr)
 
         reloaded = await _reload(pull_request)
@@ -225,6 +226,7 @@ async def test_create_pull_request_fails_when_diff_is_empty(
 
         async with async_session_factory() as db:
             db_pr = await db.get(PullRequest, pull_request.id, options=_PULL_REQUEST_LOAD_OPTIONS)
+            assert db_pr is not None
             db_pr.code_change.diff = ""
             await create_pull_request(db, db_pr)
 
@@ -255,6 +257,7 @@ async def test_create_pull_request_fails_cleanly_when_the_push_fails(
 
     async with async_session_factory() as db:
         db_pr = await db.get(PullRequest, pull_request.id, options=_PULL_REQUEST_LOAD_OPTIONS)
+        assert db_pr is not None
         await create_pull_request(db, db_pr)
 
     reloaded = await _reload(pull_request)
@@ -275,6 +278,7 @@ async def test_create_pull_request_fails_when_the_github_api_call_fails(
 
         async with async_session_factory() as db:
             db_pr = await db.get(PullRequest, pull_request.id, options=_PULL_REQUEST_LOAD_OPTIONS)
+            assert db_pr is not None
             await create_pull_request(db, db_pr)
 
         reloaded = await _reload(pull_request)
@@ -283,6 +287,7 @@ async def test_create_pull_request_fails_when_the_github_api_call_fails(
         # The branch was still pushed for real before the API call failed
         # -- a real, useful side effect isn't undone just because the
         # follow-up PR-open call failed.
+        assert reloaded.branch_name is not None
         remote_ws = Workspace(remote_root)
         refs = await remote_ws._run_git("branch", "--list", reloaded.branch_name or "")
         assert reloaded.branch_name in refs
