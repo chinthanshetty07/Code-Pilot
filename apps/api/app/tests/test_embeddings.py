@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from google.genai import errors
 
-from app.rag.embeddings import GeminiEmbeddingProvider
+from app.rag.embeddings import GeminiEmbeddingProvider, OpenAIEmbeddingProvider
 
 
 def _fake_response(values: list[float]) -> MagicMock:
@@ -103,3 +103,31 @@ async def test_embed_gives_up_after_max_retries(monkeypatch: pytest.MonkeyPatch)
 
     assert exc_info.value.code == 429
     assert provider._client.aio.models.embed_content.await_count == embeddings_module._MAX_RETRIES
+
+
+async def test_gemini_embed_query_uses_retrieval_query_task_type() -> None:
+    provider = GeminiEmbeddingProvider(api_key="fake", model="gemini-embedding-001")
+    provider._client.aio.models.embed_content = AsyncMock(return_value=_fake_response([0.5, 0.6]))
+
+    result = await provider.embed_query("how do I log out")
+
+    assert result == [0.5, 0.6]
+    call_kwargs = provider._client.aio.models.embed_content.call_args.kwargs
+    assert call_kwargs["contents"] == "how do I log out"
+    assert call_kwargs["config"].task_type == "RETRIEVAL_QUERY"
+
+
+async def test_openai_embed_query_delegates_to_embed() -> None:
+    provider = OpenAIEmbeddingProvider(api_key="fake", model="text-embedding-3-small")
+    fake_item = MagicMock()
+    fake_item.embedding = [0.7, 0.8]
+    fake_response = MagicMock()
+    fake_response.data = [fake_item]
+    provider._client.embeddings = MagicMock()
+    provider._client.embeddings.create = AsyncMock(return_value=fake_response)
+
+    result = await provider.embed_query("how do I log out")
+
+    assert result == [0.7, 0.8]
+    call_kwargs = provider._client.embeddings.create.call_args.kwargs
+    assert call_kwargs["input"] == ["how do I log out"]

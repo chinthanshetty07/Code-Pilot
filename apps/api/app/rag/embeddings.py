@@ -18,6 +18,17 @@ class EmbeddingProvider(Protocol):
 
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
+    async def embed_query(self, text: str) -> list[float]:
+        """Embed a single *search query* string.
+
+        Separate from `embed` because some providers use an asymmetric model
+        that embeds queries differently from the documents being searched
+        (see `GeminiEmbeddingProvider`) -- using the wrong one for a query
+        still returns a same-shaped vector, so this isn't something that
+        fails loudly, it just quietly makes search results worse.
+        """
+        ...
+
 
 class OpenAIEmbeddingProvider:
     dimensions = EMBEDDING_DIMENSIONS
@@ -36,6 +47,11 @@ class OpenAIEmbeddingProvider:
             response = await self._client.embeddings.create(input=batch, model=self._model)
             results.extend(item.embedding for item in response.data)
         return results
+
+    async def embed_query(self, text: str) -> list[float]:
+        # text-embedding-3-small is symmetric -- no separate query mode.
+        (embedding,) = await self.embed([text])
+        return embedding
 
 
 # Unlike OpenAI, Gemini's embedding models take exactly one text per
@@ -59,13 +75,10 @@ class GeminiEmbeddingProvider:
         self._model = model
         self._semaphore = asyncio.Semaphore(_MAX_CONCURRENT_REQUESTS)
 
-    async def _embed_one(self, text: str) -> list[float]:
+    async def _embed_one(self, text: str, task_type: str) -> list[float]:
         config = types.EmbedContentConfig(
             output_dimensionality=self.dimensions,
-            # This repository-indexing path only ever produces embeddings to
-            # be *searched against* later (Milestone 4) -- not query
-            # embeddings -- so every chunk uses the document task type.
-            task_type="RETRIEVAL_DOCUMENT",
+            task_type=task_type,
         )
         async with self._semaphore:
             for attempt in range(_MAX_RETRIES):
@@ -84,7 +97,12 @@ class GeminiEmbeddingProvider:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        return await asyncio.gather(*(self._embed_one(text) for text in texts))
+        return await asyncio.gather(
+            *(self._embed_one(text, "RETRIEVAL_DOCUMENT") for text in texts)
+        )
+
+    async def embed_query(self, text: str) -> list[float]:
+        return await self._embed_one(text, "RETRIEVAL_QUERY")
 
 
 def get_embedding_provider() -> EmbeddingProvider:

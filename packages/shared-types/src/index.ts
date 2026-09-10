@@ -46,3 +46,19 @@ export interface ConnectedRepository {
   indexed_at: string | null;
   connected_at: string;
 }
+
+// chunk_type is "function" | "class" | "method" | "interface" | "text" on
+// the backend (app/rag/chunking.py) -- left as `string` here rather than a
+// union so the frontend doesn't need updating every time a new chunk type
+// is added there.
+export interface SearchResult {
+  chunk_id: string;
+  file_path: string;
+  language: string;
+  chunk_type: string;
+  symbol_name: string | null;
+  start_line: number;
+  end_line: number;
+  content: string;
+  score: number;
+}

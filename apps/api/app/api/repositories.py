@@ -1,5 +1,5 @@
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,8 @@ from app.models.github_account import GitHubAccount
 from app.models.repository import Repository
 from app.models.user import User
 from app.schemas.repository import GithubRepoSummaryOut, RepositoryCreateIn, RepositoryOut
+from app.schemas.search import SearchResultOut
+from app.services.search import SearchResult, search_code
 
 router = APIRouter(tags=["repositories"])
 
@@ -144,3 +146,21 @@ async def trigger_repository_indexing(
     await pool.enqueue_job("index_repository_task", str(repository.id))
 
     return repository
+
+
+@router.get("/api/repositories/{repository_id}/search", response_model=list[SearchResultOut])
+async def search_repository(
+    repository_id: str,
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=500),
+    limit: int = Query(20, ge=1, le=50),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[SearchResult]:
+    await rate_limit(request, key="code_search", limit=30, window_seconds=60)
+
+    repository = await db.get(Repository, repository_id)
+    if repository is None or repository.owner_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+
+    return await search_code(db, repository.id, q, limit)

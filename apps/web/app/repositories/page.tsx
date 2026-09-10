@@ -62,6 +62,13 @@ function isPendingIndexingStatus(status: string): boolean {
   return PENDING_INDEXING_STATUSES.has(status);
 }
 
+// A repository is searchable once it has actually finished indexing and
+// produced chunks -- mirrors the identical check on the search page itself
+// (`isSearchable` in repositories/[id]/search/page.tsx).
+function isRepoSearchable(repo: ConnectedRepository): boolean {
+  return repo.indexing_status === "indexed" && repo.chunk_count > 0;
+}
+
 // Dot color per status, same convention as `HealthBadge`'s
 // `STATE_DOT_CLASS`: amber while waiting, pulsing amber while active,
 // emerald on success, red on failure. `not_indexed` has no entry — it
@@ -519,6 +526,14 @@ export default function RepositoriesPage() {
                         className="shrink-0 rounded-md border border-black/[.08] px-3 py-1.5 text-sm font-medium text-zinc-950 transition-colors hover:bg-black/[.04] disabled:cursor-default disabled:opacity-50 dark:border-white/[.145] dark:text-zinc-50 dark:hover:bg-white/[.06]"
                       >
                         {indexButtonLabel(repo.indexing_status, isRequesting)}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!isRepoSearchable(repo)}
+                        onClick={() => router.push(`/repositories/${repo.id}/search`)}
+                        className="shrink-0 rounded-md border border-black/[.08] px-3 py-1.5 text-sm font-medium text-zinc-950 transition-colors hover:bg-black/[.04] disabled:cursor-default disabled:opacity-50 dark:border-white/[.145] dark:text-zinc-50 dark:hover:bg-white/[.06]"
+                      >
+                        Search
                       </button>
                     </div>
                   </li>
