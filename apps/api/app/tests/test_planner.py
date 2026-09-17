@@ -6,7 +6,13 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.agents import planner as planner_module
-from app.agents.planner import FORCE_SUBMIT_ATTEMPTS, MAX_TURNS, create_plan
+from app.agents.planner import (
+    FORCE_SUBMIT_ATTEMPTS,
+    MAX_ESTIMATED_TOKENS_BEFORE_FORCING_SUBMIT,
+    MAX_TURNS,
+    create_plan,
+)
+from app.agents.tools import MAX_SEARCH_RESULT_CONTENT_CHARS, SEARCH_RESULT_LIMIT
 from app.core.db import async_session_factory
 from app.llm.provider import LLMResponse, TokenUsage, ToolCall, ToolSpec
 from app.models.issue import Issue
@@ -14,6 +20,7 @@ from app.models.plan import Plan
 from app.models.repository import Repository
 from app.models.usage_record import UsageRecord
 from app.models.user import User
+from app.services.search import SearchResult
 
 
 @pytest.fixture
@@ -291,3 +298,86 @@ async def test_create_plan_records_token_usage(
     assert records[0].input_tokens == 100
     assert records[0].output_tokens == 50
     assert records[0].repository_id == issue.repository_id
+
+
+def _make_large_search_results() -> list[SearchResult]:
+    """SEARCH_RESULT_LIMIT results each at the per-result cap -- the
+    worst-case content volume a single search_code call can legitimately
+    return post-truncation, matching what a real, content-rich repository
+    produces (see MAX_SEARCH_RESULT_CONTENT_CHARS's own comment for the
+    live production 413 this whole mechanism exists to prevent)."""
+    return [
+        SearchResult(
+            chunk_id=uuid.uuid4(),
+            file_path=f"src/module_{i}.py",
+            language="python",
+            chunk_type="class",
+            symbol_name=f"Thing{i}",
+            start_line=1,
+            end_line=200,
+            content="x" * MAX_SEARCH_RESULT_CONTENT_CHARS,
+            score=0.9,
+        )
+        for i in range(SEARCH_RESULT_LIMIT)
+    ]
+
+
+async def test_create_plan_stops_offering_search_code_once_conversation_is_large(
+    monkeypatch: pytest.MonkeyPatch, issue: Issue
+) -> None:
+    """Regression test for a real production bug: a model that keeps
+    calling search_code against a content-rich repository can grow the
+    conversation past a real provider's per-request token limit (a live
+    413 from Groq's 8000 TPM free-tier limit, not a hypothetical -- see
+    MAX_ESTIMATED_TOKENS_BEFORE_FORCING_SUBMIT's own comment). This
+    provider always returns another search_code call, never submit_plan on
+    its own -- if nothing stopped it, it would keep going until MAX_TURNS.
+    It must instead be cut off by the size safeguard well before then, and
+    the call that cuts if off must not offer search_code as an option."""
+    search_call = ToolCall(id="call_search", name="search_code", arguments={"query": "x"})
+    # More than enough canned "keep searching" responses to prove the
+    # safeguard -- not turn count -- is what stops it; force-submit's own
+    # responses (once search_code is no longer offered) also keep
+    # "searching" to prove *that* call correctly can't, since search_code
+    # isn't in its own tools list either way.
+    fake_provider = AsyncMock()
+    fake_provider.complete = AsyncMock(
+        return_value=LLMResponse(content=None, tool_calls=[search_call])
+    )
+    monkeypatch.setattr(planner_module, "get_llm_provider", lambda _name: fake_provider)
+    monkeypatch.setattr(
+        planner_module, "search_code", AsyncMock(return_value=_make_large_search_results())
+    )
+
+    async with async_session_factory() as db:
+        db_issue = await db.get(Issue, issue.id)
+        assert db_issue is not None
+        await create_plan(db, db_issue)
+
+    reloaded = await _reload(issue)
+    assert reloaded.planning_status == "failed"  # never submitted -- this provider never does
+    assert "did not submit a plan" in (reloaded.planning_error or "")
+
+    # The real assertion: search_code must stop being offered well before
+    # MAX_TURNS + FORCE_SUBMIT_ATTEMPTS calls were made -- proving the size
+    # safeguard (not the turn-count cap) is what actually stopped it.
+    calls_with_search_code_offered = [
+        c
+        for c in fake_provider.complete.call_args_list
+        if any(t.name == "search_code" for t in c.kwargs["tools"])
+    ]
+    assert len(calls_with_search_code_offered) < MAX_TURNS
+    # Every call once cut off (including every force-submit attempt) must
+    # never re-offer search_code.
+    calls_after_cutoff = fake_provider.complete.call_args_list[len(calls_with_search_code_offered):]
+    assert len(calls_after_cutoff) > 0
+    for c in calls_after_cutoff:
+        assert all(t.name != "search_code" for t in c.kwargs["tools"])
+
+    # The cutoff fired because real content accumulated past the
+    # threshold, not because it fired instantly on turn one.
+    assert len(calls_with_search_code_offered) >= 1
+    accumulated_content_chars = (
+        len(calls_with_search_code_offered) * SEARCH_RESULT_LIMIT * MAX_SEARCH_RESULT_CONTENT_CHARS
+    )
+    assert accumulated_content_chars >= MAX_ESTIMATED_TOKENS_BEFORE_FORCING_SUBMIT

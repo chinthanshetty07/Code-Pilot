@@ -9,7 +9,14 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
 from app.agents import reviewer as reviewer_module
-from app.agents.reviewer import FORCE_SUBMIT_ATTEMPTS, MAX_TURNS, create_review
+from app.agents.reviewer import (
+    FORCE_SUBMIT_ATTEMPTS,
+    MAX_DIFF_CHARS_IN_PROMPT,
+    MAX_TURNS,
+    _build_task_description,
+    _diff_for_prompt,
+    create_review,
+)
 from app.core.db import async_session_factory
 from app.llm.provider import LLMResponse, TokenUsage, ToolCall, ToolSpec
 from app.models.code_change import CodeChange
@@ -444,3 +451,48 @@ async def test_create_review_records_token_usage(
     assert records[0].model == "test-model"
     assert records[0].input_tokens == 300
     assert records[0].output_tokens == 80
+
+
+def test_diff_for_prompt_leaves_small_diffs_untouched() -> None:
+    diff = "diff --git a/x.py b/x.py\n+small change\n"
+    assert _diff_for_prompt(diff) == diff
+
+
+def test_diff_for_prompt_handles_none_and_empty() -> None:
+    assert _diff_for_prompt(None) == "(empty diff)"
+    assert _diff_for_prompt("") == "(empty diff)"
+
+
+def test_diff_for_prompt_truncates_oversized_diffs_with_an_explicit_notice() -> None:
+    # Regression test: an unbounded diff in the reviewer's first message
+    # could exceed a real, tight per-request token budget on its own (see
+    # MAX_DIFF_CHARS_IN_PROMPT's own comment for the production 413 this
+    # class of bug caused via search_code). Unlike search_code/read_file,
+    # a truncated *diff* needs an unmissable notice -- silently truncating
+    # what's under review risks an approval based on unseen code.
+    huge_diff = "+" + ("x" * (MAX_DIFF_CHARS_IN_PROMPT + 3000))
+
+    result = _diff_for_prompt(huge_diff)
+
+    assert len(result) < len(huge_diff)
+    assert result.startswith("+" + "x" * (MAX_DIFF_CHARS_IN_PROMPT - 1))
+    assert "TRUNCATED" in result
+    assert "3001" in result  # len(huge_diff) - MAX_DIFF_CHARS_IN_PROMPT (the leading "+" counts)
+    assert "don't approve" in result.lower()
+
+
+def test_build_task_description_includes_the_truncation_notice_for_a_huge_diff() -> None:
+    huge_diff = "+" + ("y" * (MAX_DIFF_CHARS_IN_PROMPT + 500))
+    issue = Issue(description="test issue", repository_id=uuid.uuid4(), created_by_id=uuid.uuid4())
+    code_change = CodeChange(
+        issue_id=uuid.uuid4(),
+        generation_status="generated",
+        summary="a change",
+        diff=huge_diff,
+    )
+    code_change.test_run = None
+
+    description = _build_task_description(issue, None, code_change)
+
+    assert "TRUNCATED" in description
+    assert len(description) < len(huge_diff) + 500  # meaningfully smaller than raw

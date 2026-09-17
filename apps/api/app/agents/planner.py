@@ -22,6 +22,49 @@ SEARCH_NUDGE_THRESHOLD = 3
 # this many additional attempts explicitly force submit_plan (see the
 # comment where it's used) before giving up entirely.
 FORCE_SUBMIT_ATTEMPTS = 3
+# Confirmed live (against a real, previously-failing production issue) that
+# capping each search_code result's own size (see
+# MAX_SEARCH_RESULT_CONTENT_CHARS in app/agents/tools.py) is NOT enough on
+# its own -- the model can just make more search_code calls to compensate,
+# so total accumulated conversation size keeps climbing regardless of any
+# single call's cap, until it exceeds Groq's 8000 TPM limit on the
+# free/on_demand tier.
+#
+# The first version of this safeguard used the provider's own reported
+# input_tokens from the *previous* turn to decide whether to allow the
+# *next* one -- reasonable-sounding, but confirmed live to still fail: that
+# number describes what was sent to produce the previous response, not what
+# has accumulated *since* (that turn's own tool call and tool result get
+# appended afterward, growing `messages` further before the next check ever
+# runs) -- a one-turn lag that reliably let exactly one more, large
+# search_code call through right when it mattered most.
+#
+# This instead estimates the *current*, already-appended size of `messages`
+# directly, every time through the loop, so there's no lag: the check
+# reflects exactly what the next request would actually send. Character-based
+# rather than an exact token count (no tokenizer dependency needed), using a
+# conservative ratio calibrated against real recorded usage while iterating
+# on this fix: code/JSON content tokenizes far more densely than English
+# prose (observed ~2.2-2.6 chars/token for real search_code results here,
+# not the ~4 chars/token rule of thumb that prose would suggest).
+_CHARS_PER_TOKEN_ESTIMATE = 2.2
+MAX_ESTIMATED_TOKENS_BEFORE_FORCING_SUBMIT = 4500
+# A second, higher checkpoint inside the force-submit phase itself (see
+# where it's used) -- that phase doesn't offer search_code, so it grows
+# much more slowly than the free-choice phase above, and needs a bigger
+# ceiling to not trip on completely ordinary conversations that only
+# entered force-submit because MAX_TURNS ran out (not because of size).
+MAX_ESTIMATED_TOKENS_HARD_CEILING = 7000
+
+
+def _estimate_conversation_tokens(messages: list[Message]) -> float:
+    chars = 0
+    for m in messages:
+        if m.content:
+            chars += len(m.content)
+        for call in m.tool_calls:
+            chars += len(call.name) + len(str(call.arguments))
+    return chars / _CHARS_PER_TOKEN_ESTIMATE
 
 SUBMIT_PLAN_TOOL = ToolSpec(
     name="submit_plan",
@@ -126,6 +169,17 @@ async def create_plan(db: AsyncSession, issue: Issue) -> None:
         search_call_count = 0
 
         for _turn in range(MAX_TURNS):
+            estimated_tokens = _estimate_conversation_tokens(messages)
+            if estimated_tokens >= MAX_ESTIMATED_TOKENS_BEFORE_FORCING_SUBMIT:
+                # See MAX_ESTIMATED_TOKENS_BEFORE_FORCING_SUBMIT's own
+                # comment. Checked against `messages`' actual current
+                # content -- already reflects every turn completed so far,
+                # so there's no lag between "conversation is already large"
+                # and this check seeing it. Falls through to the
+                # force-submit phase below, which already excludes
+                # search_code.
+                break
+
             response = await provider.complete(
                 messages, tools=[SEARCH_CODE_TOOL, SUBMIT_PLAN_TOOL], system=SYSTEM_PROMPT
             )
@@ -215,6 +269,18 @@ async def create_plan(db: AsyncSession, issue: Issue) -> None:
             # it. Retried a few times since even a forced, narrowed turn
             # doesn't always land on the first attempt.
             for _attempt in range(FORCE_SUBMIT_ATTEMPTS):
+                if _estimate_conversation_tokens(messages) >= MAX_ESTIMATED_TOKENS_HARD_CEILING:
+                    # Belt-and-braces: force-submit doesn't offer search_code
+                    # so it grows much more slowly than the free-choice phase
+                    # did, but a malformed-submission retry (each appending
+                    # "didn't match shape, try again" + a new response) could
+                    # still theoretically add up across FORCE_SUBMIT_ATTEMPTS
+                    # tries. Bailing out here still gets a clear, honest
+                    # "failed" result via the ValueError below instead of
+                    # risking the exact 413 this whole mechanism exists to
+                    # prevent.
+                    break
+
                 messages.append(
                     Message(
                         role="user",

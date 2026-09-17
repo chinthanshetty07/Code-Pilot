@@ -25,6 +25,20 @@ logger = logging.getLogger(__name__)
 MAX_TURNS = 8
 FORCE_SUBMIT_ATTEMPTS = 3
 
+# The diff goes straight into the *first* message, unlike search_code's
+# results (capped per-chunk in app/agents/tools.py) or read_file's content
+# (capped via app/services/workspace.py's MAX_READ_FILE_CHARS, same
+# reasoning/order of magnitude as this) -- a genuinely large change could
+# otherwise exceed a real, tight per-request token budget (a production
+# 413 from Groq's 8000 TPM free-tier limit, confirmed live -- see
+# MAX_READ_FILE_CHARS's own comment) before the Reviewer even gets to its
+# first turn. Unlike those two, silently truncating what's being reviewed
+# risks the model confidently approving a change based on code it never
+# actually saw -- so a truncated diff gets an explicit, unmissable notice
+# instead, reinforcing the system prompt's existing "never claim something
+# about code you haven't looked at" instruction for the primary diff too.
+MAX_DIFF_CHARS_IN_PROMPT = 6_000
+
 SUBMIT_REVIEW_TOOL = ToolSpec(
     name="submit_review",
     description=(
@@ -99,6 +113,21 @@ class _ReviewResult(BaseModel):
     comments: list[_ReviewComment]
 
 
+def _diff_for_prompt(diff: str | None) -> str:
+    if not diff:
+        return "(empty diff)"
+    if len(diff) <= MAX_DIFF_CHARS_IN_PROMPT:
+        return diff
+    remaining = len(diff) - MAX_DIFF_CHARS_IN_PROMPT
+    return (
+        diff[:MAX_DIFF_CHARS_IN_PROMPT]
+        + f"\n\n[... TRUNCATED, {remaining} more characters not shown. This diff is larger "
+        "than fits here -- use read_file on any file you need to see the full, current "
+        "content of, and factor not having seen the whole diff into your verdict: don't "
+        "approve based on code you haven't actually reviewed.]"
+    )
+
+
 def _build_task_description(issue, plan, code_change) -> str:
     plan_section = f"Plan summary:\n{plan.summary}\n\n" if plan is not None else ""
     test_run = code_change.test_run
@@ -112,7 +141,7 @@ def _build_task_description(issue, plan, code_change) -> str:
         f"{plan_section}"
         f"The Coder agent's summary of this change:\n{code_change.summary or '(none)'}\n\n"
         f"{test_section}"
-        f"Diff to review:\n{code_change.diff or '(empty diff)'}"
+        f"Diff to review:\n{_diff_for_prompt(code_change.diff)}"
     )
 
 

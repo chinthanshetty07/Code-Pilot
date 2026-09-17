@@ -20,8 +20,17 @@ from app.rag.ignore_patterns import should_ignore_path
 
 # Content returned to the LLM from read_file beyond this is truncated with a
 # note -- a whole giant file blowing out the context window is a worse
-# outcome than the agent needing to re-read a narrower slice of it.
-MAX_READ_FILE_CHARS = 50_000
+# outcome than the agent needing to re-read a narrower slice of it. 50_000
+# chars (~12,500+ tokens) was the original figure, but that alone already
+# exceeds Groq's 8000 TPM limit on the free/on_demand tier in a SINGLE
+# read_file call, before the system prompt or any other turn -- confirmed
+# live via the identical 413 failure mode as search_code's own
+# MAX_SEARCH_RESULT_CONTENT_CHARS (see app/agents/tools.py's comment on
+# that constant for the real production error this class of bug produces).
+# 6_000 chars (~1500 tokens) leaves comfortable headroom for a single
+# read_file call even on that tight a budget, while still covering the
+# large majority of real source files in full.
+MAX_READ_FILE_CHARS = 6_000
 
 
 class WorkspaceError(Exception):
